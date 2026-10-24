@@ -26,13 +26,7 @@ jobs:
       - name: 跑页面级回归（无头 Chrome）
         run: bash scripts/ci-test.sh
 
-      - name: 组装站点
-        run: |
-          mkdir -p _site
-          cp -R index.html large.html style.css src test AGENTS.md _site/
-          echo "站点文件："
-          find _site -type f | sort
-
+      # 站点就是 dist/ 本身（HTML + CSS + JS 都在里面），不需要再组装一次
       - name: 配置 Pages
         uses: actions/configure-pages@v5
         # Pages 尚未启用时这一步会失败（首次启用需要仓库管理员权限，CI token 没有）。
@@ -45,7 +39,7 @@ jobs:
       - name: 上传站点产物
         uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: dist
 
   # ── 部署 ────────────────────────────────────────────────
   deploy:

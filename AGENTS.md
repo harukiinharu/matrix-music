@@ -35,13 +35,13 @@
 
 1. **只有格子带色相**。播放列、试听描边、框选、微光一律中性灰 ——
    「有颜色的东西 = 有音的东西」这条语法一旦破了，图案就没法读了。
-2. 新增颜色一律进调色板（`src/theme.js` 的 PALETTES 或 `PITCH_SPEC`），
+2. 新增颜色一律进调色板（`dist/js/theme.js` 的 PALETTES 或 `PITCH_SPEC`），
    **不要在渲染器或 CSS 里写死色值**，否则另一套主题下必漏改。
 3. 浅色主题的主色**不能是黑 / 灰**：它要是青绿（与色阶高音端同族），
    `test/interaction.html` 有一条断言在守这件事（`--accent` 三通道差 > 20）。
 
 明暗两套默认跟随系统（`prefers-color-scheme`），系统切换即时生效。
-由 `src/theme.js` 把调色板写进 `TM.CONFIG.COLORS`，`<html data-theme>`
+由 `dist/js/theme.js` 把调色板写进 `TM.CONFIG.COLORS`，`<html data-theme>`
 驱动 CSS 变量。
 
 ## 2. 运行与验证
@@ -106,15 +106,19 @@ CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 index.html            基准版入口（16×16）。脚本顺序：constants → grid → audio → sequencer → renderer → storage → app
 large.html            大面板入口（36×64，半音阶）。比上面多一层 large-config，见 §12
 style.css             视觉风格（纯黑底 + 浅灰方块）。.stage-wide 是大面板的宽版布局
-src/constants.js      全部常量、音阶表、包络曲线 + TM.RUNTIME（运行时维度）。改动前先读 §5
-src/large-config.js   只被 large.html 加载：把 TM.RUNTIME 覆盖成 48 行 × 64 列。见 §12
-src/grid.js           音符网格（对应 toneMatrix::Pattern）。维度取自 TM.RUNTIME
-src/audio.js          音频引擎：振荡器 / 包络 / 声像（干声直出，无延迟）
-src/sequencer.js      步进音序器。**整条链路的唯一时基**，见 §4
-src/renderer.js       Canvas 渲染：**视口**格子图层 + 微光 + 播放列高亮
-src/storage.js        乐谱的编解码 + localStorage 存档。见 §13
-src/presets.js        示例谱（团子大家族全曲 + 16 列节选，两份 MM3 代码）
-src/app.js            装配、输入、主循环（固定步长）。两套入口共用这一份
+dist/js/constants.js      全部常量、音阶表、包络曲线 + TM.RUNTIME（运行时维度）。改动前先读 §5
+dist/js/large-config.js   只被 large.html 加载：把 TM.RUNTIME 覆盖成 48 行 × 64 列。见 §12
+dist/js/grid.js           音符网格（对应 toneMatrix::Pattern）。维度取自 TM.RUNTIME
+dist/js/audio.js          音频引擎：振荡器 / 包络 / 声像（干声直出，无延迟）
+dist/js/sequencer.js      步进音序器。**整条链路的唯一时基**，见 §4
+dist/js/renderer.js       Canvas 渲染：**视口**格子图层 + 微光 + 播放列高亮
+dist/js/storage.js        乐谱的编解码 + localStorage 存档。见 §13
+dist/js/presets.js        示例谱（团子大家族全曲 + 16 列节选，两份 MM3 代码）
+dist/                  **站点本身**：index.html / large.html / style.css / js/*.js
+                       （GitHub Pages 发布的也是这个目录，没有第二份副本）
+test/                  回归页（不进产物，只在本地 / CI 跑）
+scripts/               ci-test.sh（页面级回归）、bump.sh（资源缓存戳）
+dist/js/app.js            装配、输入、主循环（固定步长）。两套入口共用这一份
 test/selftest.html    145 项断言（离线音频渲染、微光衰减、描边不变式、乐谱编解码、暂停续播）
 test/interaction.html 158 项页面级交互断言（iframe + ?debug=1）
 test/large.html       95 项大面板断言（矩形网格 stride / 视口平移与命中 / 微光维度）
@@ -220,7 +224,7 @@ test/diag.html        频率/节点诊断
 频率 f = 440 · 2^((note − 72)/12)
 网格 16×16 / 格子 32px / 画布 512×512
 配色 格子：行 → 音高 → MIDI 八度 → 每八度一色（OCTAVE_SPEC，青 → 蓝 → 紫）
-      底色：深色 #07090C / 浅色 #FFFFFF，由 src/theme.js 覆盖
+      底色：深色 #07090C / 浅色 #FFFFFF，由 dist/js/theme.js 覆盖
       其余元素（播放列 / 描边 / 框选 / 微光）一律中性，不参与配色
 微光 每格一个 0..1 的亮度包络，逐帧 ×0.9，不做任何邻域耦合
 ```
@@ -378,7 +382,7 @@ test/diag.html        频率/节点诊断
 
 **示例谱与自动填充**
 
-- 示例存在 `src/presets.js`，是**MM3 代码字符串**（不是坐标表）：载入走
+- 示例存在 `dist/js/presets.js`，是**MM3 代码字符串**（不是坐标表）：载入走
   `applyScore()`，与「别人发你的谱子」同一条解码路径，速度 / 音量 / 回环一起套上。
 - **示例只出现在大面板**：`index.html` 里没有 `#presets` 这一行，`buildPresets()` 见不到容器
   就直接返回，chip 数组为空 —— 于是自动填充也不会发生。这是产品决定，不是没做完：
@@ -562,7 +566,7 @@ test/diag.html        频率/节点诊断
 | 一圈 | 1 小节 = 2 s @120BPM | 4 小节 = 8 s @120BPM |
 | 格子 / 方块 | 32 px / 26 px | **32 px / 26 px（与基准版逐像素同尺寸）** |
 | 画布 | 512×512 | 2048×1536（1:1 上屏，装不下就在框内滚动） |
-| 配置来源 | `CONFIG`（缺省） | `src/large-config.js` 覆盖 `TM.RUNTIME` |
+| 配置来源 | `CONFIG`（缺省） | `dist/js/large-config.js` 覆盖 `TM.RUNTIME` |
 
 **步长不变**：`RESOLUTION` 两种规格都是 16 步/小节，所以大面板变长的是**段落**，
 不是音符时值 —— 同一个速度下，两版单步的时长完全一致。
@@ -660,13 +664,13 @@ A#3，所以整块棋盘把基准版的音域整个包住了。
 - 要再降只能改渲染模型（例如把辉光拆成独立的 `mix-blend-mode` 图层、
   不再每帧整块重合成，格子层只在改动时更新），那是独立的一件事，别顺手做。
 
-**加新规格面板的步骤**：写一个 `src/xxx-config.js` 覆盖 `TM.RUNTIME`（含
+**加新规格面板的步骤**：写一个 `dist/js/xxx-config.js` 覆盖 `TM.RUNTIME`（含
 `notes`），照 `large.html` 复制一份页面并把脚本插在 `constants.js` 之后，
 然后 **记得同步 `deploy.yml` 的 `cp -R` 行**。
 
 ## 13. 乐谱的保存与导入导出
 
-`src/storage.js` 负责两件事：**自动保存**（localStorage）与**导入导出**（一段自包含代码）。
+`dist/js/storage.js` 负责两件事：**自动保存**（localStorage）与**导入导出**（一段自包含代码）。
 
 ### 格式：MM3（当前）
 

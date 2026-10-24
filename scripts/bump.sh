@@ -15,9 +15,9 @@ python3 - "$STAMP" <<'PY'
 import re, sys, pathlib
 
 stamp = sys.argv[1]
-pat = re.compile(r'((?:href|src)=")((?:style\.css|src/[a-z0-9\-]+\.js))(\?v=\d+)?(")')
+pat = re.compile(r'((?:href|src)=")((?:style\.css|js/[a-z0-9\-]+\.js))(\?v=\d+)?(")')
 
-for name in ("index.html", "large.html"):
+for name in ("dist/index.html", "dist/large.html"):
     p = pathlib.Path(name)
     s = p.read_text(encoding="utf-8")
     s2, n = pat.subn(lambda m: m.group(1) + m.group(2) + "?v=" + stamp + m.group(4), s)
