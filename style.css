@@ -1,0 +1,782 @@
+/* Matrix Music — 视觉风格：纯黑白两套配色，跟随系统明暗自动切换。
+ *
+ * 所有颜色都走 :root 里的设计令牌，正文里不再出现硬编码色值。
+ * 切换由 src/theme.js 写在 <html data-theme="dark|light"> 上；
+ * 默认（无 JS 或脚本尚未执行）保持深色，避免白底闪一下。
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ── 基础面层 ─────────────────────────────────────── */
+  --bg: #07090c;              /* 页面底色（近黑，带一点冷调，不是纯黑） */
+  --board: #07090c;           /* 棋盘底（画布容器 / 滚动框） */
+  --panel: #0c1013;           /* 控件面板 */
+  --field: #141a1f;           /* 按钮 / 输入框底色 */
+  --field-hi: #1b2228;        /* hover / 选中态 */
+  --field-active: #242c33;    /* 按下 */
+  --field-off: #101519;       /* 关闭状态的开关按钮 */
+
+  /* ── 文字 ─────────────────────────────────────────── */
+  --fg: #e6ebee;
+  --muted: #7b858d;
+  --faint: #4b545b;
+
+  /* ── 描边与刻度 ───────────────────────────────────── */
+  --line: #1a2026;            /* 结构性外框 */
+  --line-soft: #232a31;       /* 控件描边 */
+  --line-strong: #333c44;     /* hover 描边 / 标尺焦点 */
+  --tick: #2a3238;            /* 标尺刻度 */
+  --ruler: #0c1013;           /* 标尺底 / 输入框底 */
+
+  /* ── 主色：青绿。与音高色阶的高音端同族，界面因此只有一套色语言 ── */
+  --accent: #2fd3b4;
+  --accent-ink: #04120f;      /* 压住主色块上的文字 */
+  --accent-hi: #4be3c6;
+
+  /* ── 半透明叠加 ──────────────────────────────────── */
+  --cursor: #25b79f;                  /* 标尺上「当前列」那一格（**不透明**，见 .ruler-cursor） */
+  --dim: rgba(7, 9, 12, 0.72);         /* 标尺上回环区间外的压暗 */
+  --band: rgba(47, 211, 180, 0.16);   /* 标尺上回环区间内的高亮 */
+}
+
+/* 浅色：白底 + 中低明度的饱和格。主色仍然是青绿，只是压深到能在白底上立住。 */
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --board: #ffffff;
+  --panel: #fafbfc;
+  --field: #f2f4f6;
+  --field-hi: #e8ebee;
+  --field-active: #dde2e6;
+  --field-off: #f7f8f9;
+
+  --fg: #10161a;
+  --muted: #667079;
+  --faint: #98a2aa;
+
+  --line: #e4e8eb;
+  --line-soft: #dce1e5;
+  --line-strong: #c3cad0;
+  --tick: #d3d9de;
+  --ruler: #f2f4f6;
+
+  --accent: #0e8c79;
+  --accent-ink: #ffffff;
+  --accent-hi: #0a7466;
+
+  --cursor: #0f917c;
+  --dim: rgba(255, 255, 255, 0.78);
+  --band: rgba(14, 140, 121, 0.14);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+               Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  /* 换主题时给底色一点过渡，避免系统切换瞬间硬跳。
+     只过渡这两条 —— 全量 * 过渡会让画布重绘变卡。 */
+  transition: background-color 0.22s ease, color 0.22s ease;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 20px 36px;
+}
+
+.stage {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+
+/* ── 标题 ─────────────────────────────────────────────── */
+.head { text-align: center; }
+
+.head h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.head .sub {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+/* ── 棋盘：标尺 + 画布绑成一块 ─────────────────────────── */
+/* 包一层是为了让标尺紧贴棋盘 —— .stage 是 gap:20px 的 flex 列，
+   直接把标尺放进去会和棋盘被 gap 拆开。 */
+.board-box {
+  width: 100%;
+  max-width: 512px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.board-box .canvas-wrap { max-width: none; }
+
+/* ── 播放位置标尺 ─────────────────────────────────────── */
+/* 宽度与棋盘一致，所以「点在标尺的哪个位置」直接对应「第几列」。
+   大面板里它还会纵向吸顶（见文件末尾的 .stage-wide 段）。 */
+.ruler {
+  position: relative;
+  width: 100%;
+  height: 22px;
+  border-radius: 6px;
+  /* 底色 + 每列一根刻度。列数由 app.js 写成 --cols（16 或 64）。 */
+  background-color: var(--ruler);
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--tick) 0 1px,
+    transparent 1px calc(100% / var(--cols, 16)));
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: pointer;
+  touch-action: none;            /* 拖动擦洗时别让页面滚动抢走手势 */
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.ruler:focus-visible { outline: 1px solid var(--line-strong); }
+
+/* ── 回环区间：band（区间内高亮）/ dim（两侧压暗）/ edge（入点·出点把手）──
+   位置与宽度全部由 app.js 按列号换算成百分比写 inline style，CSS 只管长相。 */
+.ruler-band {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--band);
+  pointer-events: none;
+}
+
+.ruler-dim {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: var(--dim);
+  pointer-events: none;
+}
+
+.ruler-dim-l { left: 0; width: 0; }
+.ruler-dim-r { right: 0; width: 0; }
+
+/* 把手：视觉上是一条 2px 竖线，外面留 11px 的命中区 —— 太细根本点不着 */
+.ruler-edge {
+  position: absolute;
+  top: 0;
+  width: 11px;
+  height: 100%;
+  margin-left: -5.5px;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 2;
+}
+
+.ruler-edge::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 4.5px;
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.ruler-edge:hover::before,
+.ruler-edge:focus-visible::before { left: 4px; width: 3px; }
+.ruler-edge:focus-visible { outline: none; }
+
+/* 当前位置：**一整格宽的竖条**。
+   这里刻意不用细线 —— 细线是入点/出点的语言，两者长得一样就分不清
+   「播到哪」和「区间从哪到哪」了。宽度由 --cols 算，跟格子对齐。
+
+   颜色必须**不透明**：半透明的话，拖出点时区间高亮的边界会从这块内部扫过，
+   叠出更深的子区域，看着就像游标在左右伸缩（踩过）。 */
+.ruler-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: calc(100% / var(--cols, 16));
+  border-radius: 2px;
+  background: var(--cursor);
+  pointer-events: none;
+}
+
+/* ── 画布 ─────────────────────────────────────────────── */
+.canvas-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 512px;
+  aspect-ratio: 1 / 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--board);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+#matrix {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/* ── 控件 ─────────────────────────────────────────────── */
+.controls {
+  width: 100%;
+  max-width: 512px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.ctl-row { display: flex; align-items: center; }
+
+.ctl-actions { gap: 8px; flex-wrap: wrap; }
+
+/* 动作组与显示开关组之间的分组竖线 */
+.ctl-sep {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 18px;
+  margin: 0 5px;
+  background: var(--line-soft);
+}
+
+/* ── 示例谱 chip ──────────────────────────────────────── */
+/* 五个 chip 一行放得下（控件区宽 512），窄屏自动折行。 */
+.presets { gap: 6px; flex-wrap: wrap; }
+
+.presets-label {
+  flex: 0 0 auto;
+  margin-right: 2px;
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: 0.04em;
+}
+
+.chip {
+  appearance: none;
+  border: 1px solid var(--line-soft);
+  background: var(--field-off);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.chip:hover { color: var(--fg); border-color: var(--line-strong); background: var(--field-hi); }
+
+/* 选中态用主色实心：一眼看出「现在放的是示例几」，点棋盘或改音符就自动褪掉 */
+.chip[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* 参数区对齐成列：标签 / 滑块 / 数值 */
+.ctl-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 10px 12px;
+}
+
+.f-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+.f-value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  text-align: right;
+  min-width: 58px;
+  white-space: nowrap;
+}
+
+.f-range { width: 100%; min-width: 72px; }
+
+.btn {
+  appearance: none;
+  border: 1px solid var(--line-soft);
+  background: var(--field);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 15px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.btn:hover { background: var(--field-hi); border-color: var(--line-strong); }
+.btn:active { background: var(--field-active); }
+
+.btn.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+
+.btn.primary:hover { background: var(--accent-hi); border-color: var(--accent-hi); }
+
+/* 开关型按钮：左侧小圆点 + 整块明暗表示状态，避免和 primary 的实心块撞脸 */
+.btn.toggle { min-width: 78px; }
+
+.btn.toggle::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: currentColor;
+  opacity: 0.28;
+  transition: opacity 0.15s ease;
+}
+
+.btn.toggle[aria-pressed="true"] {
+  color: var(--fg);
+  background: var(--field-hi);
+  border-color: var(--line-strong);
+}
+
+.btn.toggle[aria-pressed="true"]::before { opacity: 1; }
+
+.btn.toggle[aria-pressed="false"] {
+  color: var(--muted);
+  background: var(--field-off);
+  border-color: var(--line-soft);
+}
+
+input[type="range"] {
+  appearance: none;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-soft);
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ── 乐谱：导出 / 载入面板 ─────────────────────────────── */
+/* .ctl-row 自带 display: flex，会盖掉 [hidden] 的 display: none
+   （作者样式优先于 UA 样式表），所以这条必须显式写。 */
+.ctl-row[hidden] { display: none; }
+
+.ctl-share {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.share-code {
+  width: 100%;
+  min-height: 46px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--ruler);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+  resize: vertical;
+}
+
+.share-code:focus { outline: none; border-color: var(--line-strong); }
+
+.share-acts { display: flex; align-items: center; gap: 8px; }
+
+.share-status {
+  margin: 0;
+  min-height: 15px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/* ── 页脚 ─────────────────────────────────────────────── */
+.foot { text-align: center; }
+
+.foot p { margin: 0; font-size: 12px; color: var(--muted); }
+
+.foot .switch { margin-top: 8px; font-size: 11px; }
+
+.foot .switch a {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line-soft);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.foot .switch a:hover { color: var(--fg); border-color: var(--line-strong); }
+.foot .meta { margin-top: 6px; font-size: 11px; color: var(--faint); line-height: 1.6; }
+.foot strong { color: var(--fg); font-weight: 500; }
+
+/* ── 大面板（large.html）───────────────────────────────── */
+/* 棋盘是 2048 × 1536（64 × 48 格 × 32px），比笔记本视口大。这里**不缩放**：
+   画布按逻辑尺寸 1:1 上屏（宽高由 large-config.js 写成 --board-w / --board-h），
+   方块因此与小面板逐像素同尺寸。
+   整页高度锁死，把滚动**收进 .board-frame 里** —— 页头、控件、页脚始终可见。
+   回退值就写成实际尺寸，避免脚本执行前先渲染成小尺寸再跳一下。 */
+body.wide {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;                /* 整页不滚，滚动交给棋盘框 */
+  padding: 10px 16px 14px;
+}
+
+.stage-wide {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: none;
+  gap: 10px;
+}
+
+/* ── 大面板的顶栏（2026-10-24 改版）──────────────────────
+   标题 / 简介 / 操作 / 参数全部压进一条 52px 的 bar，棋盘因此吃到
+   顶栏以下的全部高度。原来是一个 header + 一大块控件 + 三段页脚，
+   棋盘只分到中间一小条。 */
+body.wide { padding: 0; }
+
+.stage-wide { gap: 0; }
+
+.topbar {
+  position: relative;              /* 浮层的定位上下文 */
+  flex: 0 0 auto;
+  width: 100%;                     /* .stage 是 align-items:center，不写就会缩成内容宽 */
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  z-index: 6;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;                    /* 让下面的 sub 能省略号收尾 */
+}
+
+.brand h1 {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.brand .tag {
+  padding: 1px 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.brand .sub {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bar-actions .ctl-sep { height: 20px; margin: 0 2px; }
+.bar-actions .btn { padding: 6px 12px; font-size: 12px; }
+.bar-actions .btn.icon {
+  min-width: 28px;
+  padding: 6px 8px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--muted);
+}
+.bar-actions .btn.icon:hover { color: var(--fg); }
+
+/* 回基准版的文字入口：比按钮轻，不跟主操作抢注意力 */
+.bar-link {
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.bar-link:hover { color: var(--fg); border-color: var(--line-soft); }
+
+/* 参数：标签 + 滑块 + 数值挤成一小段，字号比正文小一档 */
+.field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+.field-value {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  min-width: 52px;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.bar-actions .f-range { width: 84px; }
+
+.bar-actions .presets { gap: 5px; }
+.bar-actions .presets-label { font-size: 11px; margin-right: 0; }
+.bar-actions .chip { padding: 5px 9px; font-size: 11px; }
+
+/* ── 顶栏上的浮层：不占文档流，弹出时棋盘不动 ────────── */
+.pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 14px;
+  width: min(520px, calc(100vw - 28px));
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.30);
+  z-index: 20;
+}
+
+.pop[hidden] { display: none; }
+
+/* 谱子浮层沿用 .ctl-share 的竖向排布，边框改成浮层自己的描边 */
+.pop.ctl-share { border-top: 1px solid var(--line-soft); padding-top: 12px; }
+
+/* 一行几 kb 的代码在浮层里横着滚很难读，让它折行 */
+.pop .share-code { white-space: pre-wrap; word-break: break-all; }
+
+.pop-help {
+  width: min(680px, calc(100vw - 28px));
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 26px;
+}
+
+.pop-col { min-width: 0; }
+
+.pop-title {
+  margin: 0 0 8px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.keys { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+
+.keys li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--line-soft);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--field-off);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+/* 窄屏：简介先让位，再不行就换行；滑块收窄 */
+@media (max-width: 1180px) {
+  .brand .sub { display: none; }
+  .bar-actions .f-range { width: 64px; }
+  .bar-actions .field-value { min-width: 44px; }
+}
+
+@media (max-width: 900px) {
+  .topbar { flex-wrap: wrap; row-gap: 8px; }
+  .bar-actions { width: 100%; margin-left: 0; flex-wrap: wrap; }
+  .pop-help { grid-template-columns: 1fr; }
+}
+
+/* 棋盘壳：限宽限高、居中，滚动交给里层的滚动框 */
+.board-shell {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  max-width: var(--board-w, 2048px);
+  max-height: var(--board-h, 1536px);
+}
+
+/* 棋盘的滚动框：装得下就没有滚动条，装不下就在框内滚。 */
+.board-frame {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--board);
+}
+
+/* 用 margin:auto 居中，**不要**用 flex 的 justify-content —— 后者在内容
+   溢出时会把起始边挤出容器，且永远滚不到那个方向（经典陷阱）。 */
+.stage-wide .board-box {
+  width: var(--board-w, 2048px);
+  max-width: none;
+  margin: 0 auto;                  /* 框比棋盘宽时居中；比棋盘窄时自动退化成 0 */
+  gap: 0;
+}
+
+/* 标尺在滚动框里**纵向吸顶** —— 滚到棋盘下半部分也还能拖游标；
+   横向则跟着棋盘一起滚，所以标尺上的位置始终对着同一列。 */
+.stage-wide .ruler {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: auto;
+  height: 22px;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+/* 大面板横向不平移滚动条：宽度就是视口宽度，平移靠手势（见 app.js 的 panTo）。
+   纵向仍然原生滚动（48 行 × 32px = 1536px，装不进屏幕）。 */
+.stage-wide .board-frame {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.stage-wide .canvas-wrap {
+  flex: 0 0 auto;
+  margin: 0;                       /* 居中交给 .board-box 的 margin: auto */
+  width: var(--board-w, 2048px);
+  height: var(--board-h, 1536px);
+  max-width: none;
+  aspect-ratio: auto;              /* 宽高都已给定，不再靠比例推 */
+  border-radius: 0;                /* 圆角交给 .board-frame */
+  box-shadow: none;
+}
+
+/* 控件栏跟棋盘一样宽会很难看（滑块能拉出 2000px），单独限宽居中。
+   顺手压紧一点纵向：棋盘框能多分到几十像素。 */
+.stage-wide .controls {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 11px 14px;
+  gap: 11px;
+}
+
+/* 标题上的规格标签 */
+.head .tag {
+  margin-left: 7px;
+  padding: 1px 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  vertical-align: 3px;
+}
+
+@media (max-width: 480px) {
+  body { padding: 18px 14px 26px; }
+  .controls { gap: 10px 14px; padding: 12px; }
+  input[type="range"] { width: 80px; }
+}
+
+/* 尊重「减少动态效果」偏好：换主题不再做过渡 */
+@media (prefers-reduced-motion: reduce) {
+  html, body { transition: none; }
+}

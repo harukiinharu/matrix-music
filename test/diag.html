@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>diag</title></head>
+<body>
+<pre id="out">running…</pre>
+<script src="../src/constants.js"></script>
+<script src="../src/audio.js"></script>
+<script>
+var TM = window.TM, lines = [];
+function log(s) { lines.push(s); document.getElementById('out').textContent = lines.join('\n'); }
+
+function crossings(L, from, to) {
+  var n = 0, prev = L[from];
+  for (var j = from + 1; j < to; j++) {
+    var c = L[j];
+    if ((prev < 0 && c >= 0) || (prev >= 0 && c < 0)) n++;
+    prev = c;
+  }
+  return n;
+}
+
+// 简易 Goertzel：在候选频率上找主频
+function dominant(L, from, to, fs) {
+  var best = 0, bestF = 0;
+  for (var f = 200; f <= 1600; f += 2) {
+    var w = 2 * Math.PI * f / fs, cw = Math.cos(w), sw = Math.sin(w);
+    var s0 = 0, s1 = 0, s2 = 0;
+    for (var i = from; i < to; i++) {
+      s0 = L[i] + 2 * cw * s1 - s2; s2 = s1; s1 = s0;
+    }
+    var mag = s1 * s1 + s2 * s2 - 2 * cw * s1 * s2;
+    if (mag > best) { best = mag; bestF = f; }
+  }
+  return bestF;
+}
+
+function run(name, build, note, dur) {
+  var fs = 44100;
+  var oc = new OfflineAudioContext(2, Math.round(fs * (dur || 0.6)), fs);
+  build(oc);
+  oc.startRendering().then(function (buf) {
+    var L = buf.getChannelData(0);
+    var from = 44, to = Math.floor(fs * 0.3);
+    var x = crossings(L, from, to);
+    log(name + '\n  sampleRate=' + buf.sampleRate + ' length=' + buf.length +
+        '\n  过零数=' + x + '  → 估算 ' + (x / 2 / ((to - from) / buf.sampleRate)).toFixed(1) + ' Hz' +
+        '\n  Goertzel 主频 ≈ ' + dominant(L, from, to, buf.sampleRate) + ' Hz');
+    next();
+  });
+}
+
+var todos = [];
+function next() { if (todos.length) todos.shift()(); else log('\nDONE'); }
+
+var realRandom = Math.random;
+Math.random = function () { return 0.5; };
+
+todos.push(function () {
+  run('T1 裸振荡器 440 Hz', function (oc) {
+    var o = oc.createOscillator(); o.type = 'sine'; o.frequency.value = 440;
+    var g = oc.createGain(); g.gain.value = 0.16;
+    o.connect(g); g.connect(oc.destination); o.start(0.001);
+  });
+});
+
+todos.push(function () {
+  run('T2 振荡器 + 常量增益 + WaveShaper(soft) + oversample2x', function (oc) {
+    var o = oc.createOscillator(); o.type = 'sine'; o.frequency.value = 440;
+    var g = oc.createGain(); g.gain.value = 0.16;
+    var ws = oc.createWaveShaper();
+    var n = 4096, cur = new Float32Array(n), T = 0.7, R = 1 - T;
+    for (var i = 0; i < n; i++) {
+      var v = (i / (n - 1)) * 2 - 1;
+      if (v > T) cur[i] = T + R * Math.tanh((v - T) / R);
+      else if (v < -T) cur[i] = -T - R * Math.tanh((-v - T) / R);
+      else cur[i] = v;
+    }
+    ws.curve = cur; ws.oversample = '2x';
+    o.connect(g); g.connect(ws); ws.connect(oc.destination); o.start(0.001);
+  });
+});
+
+todos.push(function () {
+  run('T3 振荡器 + 包络曲线(env²) + merger 2ch', function (oc) {
+    var o = oc.createOscillator(); o.type = 'sine'; o.frequency.value = 440;
+    var env = oc.createGain();
+    env.gain.setValueAtTime(0, 0.001);
+    env.gain.setValueCurveAtTime(TM.buildEnvelopeCurve(96), 0.001, 0.5);
+    var mg = oc.createChannelMerger(2);
+    o.connect(env); env.connect(mg, 0, 0); env.connect(mg, 0, 1);
+    mg.connect(oc.destination); o.start(0.001);
+  });
+});
+
+todos.push(function () {
+  run('T4 完整 AudioEngine.synthNote(72)', function (oc) {
+    var eng = new TM.AudioEngine();
+    eng.buildGraph(oc);
+    eng.setVolume(1);
+    eng.synthNote(72, 0);
+  });
+});
+
+// T5 已删除：它当年用来对比「绕过延迟直连母线」的波形。延迟线已在
+// 2026-10-22 整条移除（每个音后面跟着 375 ms 的重影），现在 T4 本身就是干声。
+
+Math.random = realRandom;
+next();
+</script>
+</body>
+</html>

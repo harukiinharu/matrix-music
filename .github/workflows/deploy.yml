@@ -1,0 +1,60 @@
+name: 构建并部署到 GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 部署到 Pages 需要的权限；concurrency 保证同一时间只有一次部署在跑
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  # ── 构建：先跑回归，通过后才产出站点产物 ────────────────
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 跑页面级回归（无头 Chrome）
+        run: bash scripts/ci-test.sh
+
+      - name: 组装站点
+        run: |
+          mkdir -p _site
+          cp -R index.html large.html style.css src test AGENTS.md _site/
+          echo "站点文件："
+          find _site -type f | sort
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+        # Pages 尚未启用时这一步会失败（首次启用需要仓库管理员权限，CI token 没有）。
+        # 不让它中断构建，真正的错误交给 deploy 步骤报出来，信息更明确。
+        continue-on-error: true
+        with:
+          # 若权限允许就顺手启用；不允许时忽略
+          enablement: true
+
+      - name: 上传站点产物
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  # ── 部署 ────────────────────────────────────────────────
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 部署到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

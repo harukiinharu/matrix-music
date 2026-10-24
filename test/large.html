@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>large</title></head>
+<body>
+<canvas id="tcanvas" width="16" height="16"></canvas>
+<pre id="out">running…</pre>
+<script>
+/* 大面板的乐谱会自动存进 localStorage；本测试要求「初始网格为空」，
+   所以要在 iframe 开始加载**之前**清掉自己的键。
+   （父页与 iframe 同为 file:// origin，共用同一份存储。） */
+try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存储不可用则忽略 */ }
+</script>
+<iframe id="app" src="../large.html?debug=1" width="1100" height="1400" style="border:0"></iframe>
+<script src="../src/constants.js"></script>
+<script src="../src/large-config.js"></script>
+<script src="../src/grid.js"></script>
+<script src="../src/audio.js"></script>
+<script src="../src/sequencer.js"></script>
+<script src="../src/renderer.js"></script>
+<script src="../src/storage.js"></script>
+<script>
+/*
+ * Matrix Music 大面板（48 行 × 64 列，半音阶）自检
+ *
+ * 这一套专门盯「矩形网格」相对基准版正方形网格多出来的失败模式：
+ *   1. 一维数组拿 `size` 当 stride —— cols ≠ rows 时整片串位；
+ *   2. 音序器 % GRID 提前归零 —— 后半段永远播不到；
+ *   3. 命中测试写死 16 —— 右半边整片映射到错误列；
+ *   4. 各种固定 16 的循环边界（行扫描、微光衰减统计、越界判断）。
+ *
+ * 本页同时加载 large-config.js，所以 TM.RUNTIME 就是大盘面配置。
+ * 页面级部分用 iframe 加载真实的 large.html?debug=1，断言建立在模型状态上。
+ */
+(function () {
+  var TM = window.TM, CFG = TM.CONFIG, R = TM.RUNTIME;
+  var lines = [], pass = 0, fail = 0, done = false;
+
+  function check(name, ok, detail) {
+    (ok ? pass++ : fail++);
+    lines.push((ok ? 'PASS  ' : 'FAIL  ') + name + (detail ? '   ' + detail : ''));
+  }
+  function info(name, detail) { lines.push('INFO  ' + name + '   ' + detail); }
+  function near(a, b, tol) { return Math.abs(a - b) <= tol; }
+
+  function report() {
+    if (done) return;
+    done = true;
+    lines.unshift('Matrix Music 大面板自检 —— ' + pass + ' 通过 / ' + fail + ' 失败');
+    lines.unshift('');
+    document.getElementById('out').textContent = lines.join('\n');
+    document.title = 'DONE ' + pass + '/' + (pass + fail);
+  }
+
+  window.addEventListener('error', function (ev) {
+    lines.push('JS ERROR: ' + ev.message + ' @line ' + ev.lineno);
+    fail++; report();
+  });
+  window.addEventListener('unhandledrejection', function (ev) {
+    lines.push('PROMISE REJECT: ' + (ev.reason && ev.reason.message || ev.reason));
+    fail++; report();
+  });
+  setTimeout(function () {
+    if (!done) {
+      lines.push('WATCHDOG: 12s 内未完成');
+      fail++; report();
+    }
+  }, 12000);
+
+  // ── 1. 音表：半音阶，48 行（基准版最高音再往上一个八度）───
+  // 与 src/large-config.js 保持同一条构造式：半音阶，行 0 = 基准版最高音 + 12
+  var ROWS = 48;
+  var TOP = CFG.NOTES[0] + 12;              // 108 = A7
+  var notes = TM.buildScaleTable(ROWS, TOP, TM.SCALES.chromatic);
+  check('buildScaleTable(48) 长度 = 48', notes.length === 48, notes.length + '');
+  check('行 0 是最高的音（A7 = 108，比基准版最高音高一个八度）',
+        notes[0] === 108, notes[0] + '');
+  check('行 47 是最低的音（A#3 = 61，底部未变）', notes[47] === 61, notes[47] + '');
+  // 往上加八度不该动到底部：旧表（96..61）应原样落在新表的行 12..47
+  check('旧音域（A6 → A#3）完整落为新表的行 12..47', (function () {
+    var old = TM.buildScaleTable(36, CFG.NOTES[0], TM.SCALES.chromatic);
+    for (var i = 0; i < 36; i++) if (notes[i + 12] !== old[i]) return false;
+    return true;
+  })());
+
+  var monotonic = true, intervals = {};
+  for (var i = 1; i < notes.length; i++) {
+    var d = notes[i - 1] - notes[i];
+    if (d <= 0) monotonic = false;
+    intervals[d] = (intervals[d] || 0) + 1;
+  }
+  check('音高严格递减', monotonic);
+  // 半音阶的相邻音程**只能**是 1 —— 这就是「像吉他每格一品」的定义
+  check('相邻行恰好差 1 个半音（半音阶）',
+        intervals[1] === notes.length - 1 && Object.keys(intervals).length === 1,
+        '出现音程 ' + Object.keys(intervals).sort().join('/'));
+
+  // 每八度 12 个音级 = 7 个自然音 + 5 个变化音
+  var pitchClasses = {};
+  notes.forEach(function (n) { pitchClasses[((n - 72) % 12 + 12) % 12] = 1; });
+  check('每八度 12 个音级（7 + 5）',
+        Object.keys(pitchClasses).length === 12,
+        '音级 ' + Object.keys(pitchClasses).map(Number).sort(function (a, b) {
+          return a - b;
+        }).join(','));
+  check('12 个音级全都出现（没有漏掉某个半音）', (function () {
+    for (var p = 0; p < 12; p++) if (!pitchClasses[p]) return false;
+    return true;
+  })());
+  // 基准版五声里没有的变化音，现在都齐了
+  check('基准版五声缺的第 4 音 G(10) 与第 7 音 C#(4) 现在都在',
+        pitchClasses[10] === 1 && pitchClasses[4] === 1,
+        'G(10) / C#(4)');
+
+  // 48 行铺 108..61，基准版 16 个音里有 15 个落在表内 —— 仍然只有最低的 A3(60)
+  // 差一个半音（底部没动）。这条把音域边界钉死：谁改了行数或起始音，它会立刻红。
+  var missing = CFG.NOTES.filter(function (n) { return notes.indexOf(n) < 0; });
+  check('半音阶覆盖基准版音域，只差最低的 A3(60) 一个半音',
+        missing.length === 1 && missing[0] === 60,
+        missing.length ? '缺 ' + missing.join(',') : '16 / 16 命中');
+
+  var fLow = TM.noteToFrequency(notes[47]), fHigh = TM.noteToFrequency(notes[0]);
+  check('音域落在可听范围内（20 Hz ~ 20 kHz）',
+        fLow > 20 && fHigh < 20000,
+        fLow.toFixed(1) + ' Hz ~ ' + fHigh.toFixed(1) + ' Hz');
+  // 端点不是猜的：440 · 2^3 = 3520 Hz（A7），440 · 2^(-11/12) = 233.08 Hz（A#3）
+  check('音域端点 = A7 (3520 Hz) → A#3 (233.1 Hz)',
+        near(fHigh, 3520, 0.01) && near(fLow, 233.08, 0.05),
+        fHigh.toFixed(2) + ' Hz ~ ' + fLow.toFixed(2) + ' Hz');
+  check('音域 = 47 个半音（将近 4 个八度）',
+        Math.abs(Math.log(fHigh / fLow) / Math.LN2 - 47 / 12) < 1e-9,
+        (Math.log(fHigh / fLow) / Math.LN2).toFixed(2) + ' 个八度');
+
+  // 生成器自校验：五声 + 基准版最高音，必须逐位复现 CONFIG.NOTES
+  var n16 = TM.buildScaleTable(16, CFG.NOTES[0], TM.SCALES.pentatonic);
+  check('buildScaleTable 能逐位复现基准版 NOTES',
+        n16.join(',') === CFG.NOTES.join(','), n16.join(','));
+  // 起手音不在音阶里必须报错，而不是悄悄产出错音表
+  var threw = false;
+  try { TM.buildScaleTable(8, CFG.NOTES[0] + 1, TM.SCALES.pentatonic); }
+  catch (e) { threw = true; }
+  check('起手音不在音阶内时抛错', threw);
+
+  // 运行时确实被覆盖了，而 CONFIG 没被动过
+  check('RUNTIME 已被 large-config 覆盖（数据宽度 1024 列 + 允许横向平移）',
+        R.cols === 1024 && R.rows === 48 && R.cell === 32 && R.scrollX === true,
+        R.cols + '×' + R.rows + ' scrollX=' + R.scrollX);
+  check('CONFIG 保持基准版（GRID/NOTES 未被改动）',
+        CFG.GRID === 16 && CFG.NOTES.length === 16 && CFG.CELL === 32);
+
+  // ── 1.5 稀疏编码在大面板上的收益 ───────────────────────
+  // 旧 MM1 是稠密位图，64×48 固定 512 字符；MM2 只记有音符的位置。
+  var oneNote = new TM.Grid();
+  oneNote.set(10, 20, true);
+  var sparseCode = TM.Store.encode(oneNote, R.notes);
+  // MM3 是 JSON + LZW，比 MM2 长（多带参数），但仍远短于旧 MM1 的固定 512
+  check('大面板单个音符的代码远短于旧格式的固定长度',
+        sparseCode.length < 120, sparseCode + '（' + sparseCode.length +
+        ' 字符；旧 MM1 固定 512）');
+  var backOne = new TM.Grid();
+  check('大面板上编解码往返一致',
+        TM.Store.applyCode(backOne, sparseCode, R.notes).ok &&
+        backOne.count() === 1 && backOne.get(10, 20));
+  check('存储键是 matrixmusic.score.large，**不含尺寸**（加减八度后存档还能用）',
+        TM.Store.storageKey() === 'matrixmusic.score.large' &&
+        TM.Store.panelId() === 'large', TM.Store.storageKey());
+
+  // ── 2. 矩形网格：stride 与边界 ─────────────────────────
+  var g = new TM.Grid();
+  check('Grid 维度 = 1024 × 48（数据宽度，不是视口宽度）',
+        g.cols === 1024 && g.rows === 48, g.cols + '×' + g.rows);
+  check('底层数组长度 = cols × rows', g.cells.length === 1024 * 48, g.cells.length + '');
+  check('索引 = 列 × 行数 + 行', g.index(63, 47) === 63 * 48 + 47,
+        'index(63,47) = ' + g.index(63, 47));
+
+  // 拿 size 当 stride 就会在这里翻车：(1,0) 与 (0,1) 会落到同一个下标
+  var g1 = new TM.Grid();
+  g1.set(1, 0, true);
+  check('矩形下 (1,0) 不串到 (0,1)',
+        g1.get(1, 0) === true && g1.get(0, 1) === false && g1.count() === 1,
+        'count = ' + g1.count());
+
+  // stride 写成 cols（而不是 rows）时，右下角会落到数组之外被静默丢弃。
+  // 这两条把「列主序映射是双射且铺满」钉死，任何 stride 混淆都跑不掉。
+  var gs = new TM.Grid();
+  var seen = {}, unique = true;
+  for (var sc = 0; sc < 64; sc++) {
+    for (var sr = 0; sr < 48; sr++) {
+      var idx = gs.index(sc, sr);
+      if (seen[idx]) unique = false;
+      seen[idx] = 1;
+    }
+  }
+  check('每个格子的下标唯一（列主序是双射）',
+        unique && Object.keys(seen).length === 3072,
+        Object.keys(seen).length + ' 个不同下标');
+
+  var gAll = new TM.Grid();
+  for (var ac = 0; ac < 64; ac++) for (var ar = 0; ar < 48; ar++) gAll.set(ac, ar, true);
+  check('铺满 64 × 48 全部可写（stride 未越界）',
+        gAll.count() === 3072 && gAll.get(63, 47) && gAll.get(0, 0),
+        'count = ' + gAll.count());
+
+  var g2 = new TM.Grid();
+  g2.set(63, 47, true);
+  check('右下角可读可写', g2.get(63, 47) === true && g2.count() === 1);
+  g2.set(1024, 0, true);        // 数据宽 1024 列，所以第 1024 列才越界
+  g2.set(0, 48, true);          // 48 行，所以第 48 行才越界（行数改过两次，这里要跟着走）
+  g2.set(-1, 0, true);
+  check('越界写入被拒绝', g2.count() === 1, 'count = ' + g2.count());
+
+  var g3 = new TM.Grid();
+  g3.paintLine({ col: 0, row: 0 }, { col: 63, row: 0 }, true);
+  check('跨 64 列拖动补齐 63 格（起点不动）',
+        g3.count() === 63 && g3.get(63, 0) && !g3.get(0, 0),
+        'count = ' + g3.count());
+
+  var g4 = new TM.Grid();
+  g4.paintLine({ col: 0, row: 0 }, { col: 0, row: 47 }, true);
+  check('跨 48 行拖动补齐 47 格', g4.count() === 47 && g4.get(0, 47),
+        'count = ' + g4.count());
+
+  // ── 3. 音序器：绕回按列数，行扫描按行数 ─────────────────
+  function fakeAudio() {
+    return {
+      ready: true,
+      ctx: { currentTime: 0 },
+      tempo: 120,
+      played: [],
+      synthNote: function (note) { this.played.push(note); },
+      setTempo: function (b) { this.tempo = b; },
+      outputLatency: function () { return 0; }
+    };
+  }
+
+  var fa = fakeAudio();
+  var sg = new TM.Grid();
+  var seq = new TM.Sequencer(fa, sg, R);
+  check('音序器取到 48 音的音表',
+        seq.notes.length === 48 && seq.notes === R.notes, seq.notes.length + ' 个音');
+
+  // 从第 60 步起步并让 nextStepTime 落在过去，一次 _tick 会连排若干步。
+  // 若绕回仍写死 % 16，第 61 步会变成 13（61 % 16），序列立刻断掉。
+  seq.playing = true;
+  seq.currentStep = 60;
+  seq.nextStepTime = -0.5;                       // 120 BPM 步长 0.125 → 排 5 步
+  seq._tick();
+  var steps = seq.timeline.map(function (t) { return t.step; });
+  check('步号跨过 64 才绕回（不是 16）',
+        steps.length === 5 &&
+        steps[0] === 60 && steps[1] === 61 && steps[2] === 62 &&
+        steps[3] === 63 && steps[4] === 0,
+        steps.join(','));
+  // currentStep 指向「下一个待排的步」：排完第 0 步后它应前进到 1
+  check('绕回后 currentStep 前进到 1（而非 0 以外的地方）',
+        seq.currentStep === 1, seq.currentStep + '');
+
+  // 行扫描必须覆盖全部 48 行：第 20 行与第 47 行都超出基准版的 16 行循环
+  var fa2 = fakeAudio();
+  var sg2 = new TM.Grid();
+  var seq2 = new TM.Sequencer(fa2, sg2, R);
+  sequencerTestRows(sg2, seq2);
+
+  function sequencerTestRows(grid, s) {
+    grid.set(7, 20, true);                       // 行 20 → notes[20] = 88
+    grid.set(7, 47, true);                       // 行 47 → notes[47] = 61
+    grid.set(7, 3, true);                        // 行 3  → notes[3] = 105
+    s._scheduleStep(7, 0);
+  }
+  var played = fa2.played.slice().sort(function (a, b) { return a - b; });
+  check('排程扫描全部 48 行（含基准版循环之外的行）',
+        played.length === 3 && played[0] === 61 && played[1] === 88 && played[2] === 105,
+        played.join(','));
+  check('音高取自 RUNTIME 音表而非 CONFIG.NOTES',
+        played[2] === R.notes[3] && R.notes[3] !== CFG.NOTES[3],
+        'notes[3] = ' + R.notes[3] + '，基准版 notes[3] = ' + CFG.NOTES[3]);
+
+  // 时间轴反查在 64 步下仍然正确
+  check('stepAtTime 反查 64 步时间轴',
+        seq.stepAtTime(-0.5) === 60 && seq.stepAtTime(-0.4) === 60 &&
+        seq.stepAtTime(-0.375) === 61 && seq.stepAtTime(0) === 0,
+        [seq.stepAtTime(-0.5), seq.stepAtTime(-0.375), seq.stepAtTime(0)].join(','));
+
+  // 测试里自己造的渲染器统一用 64 列视口：几何与改造前的「定宽 64 列」逐位一致，
+  // 下面的尺寸断言因此仍然成立（w = 2048、光晕 512×384、采样层 64×48）。
+  function ropts(extra) {
+    var o = {}, k;
+    for (k in R) o[k] = R[k];
+    o.viewCols = 64;
+    if (extra) for (k in extra) o[k] = extra[k];
+    return o;
+  }
+
+  // ── 4. 渲染器：矩形尺寸与局部重绘 ──────────────────────
+  var canvas = document.getElementById('tcanvas');
+  var rg = new TM.Grid();
+  var r = new TM.Renderer(canvas, rg, ropts());
+
+  check('逻辑尺寸 = 视口列数 × cell / rows × cell',
+        r.w === 64 * r.cell && r.h === 1536, r.w + '×' + r.h + '（视口 ' + r.viewCols + ' 列）');
+  check('画布尺寸 = 逻辑尺寸 × dpr',
+        canvas.width === r.devW && canvas.height === r.devH,
+        canvas.width + '×' + canvas.height + ' (dpr ' + r.scale + ')');
+  check('devSize 仍等于 devW（兼容旧探针）', r.devSize === r.devW);
+
+  // 本轮的诉求就是这条：大盘面的方块必须与基准版**逐像素同尺寸**。
+  // 比的是设备像素下的方块边长，而不是配置项名字。
+  function blockPx(rr) { return (rr.cell - 2 * rr.inset) * rr.scale; }
+  var rOrig16 = new TM.Renderer(canvas, new TM.Grid({ cols: 16, rows: 16 }), {});
+  check('方块与基准版同尺寸（cell / inset / radius 全部沿用基准版）',
+        r.cell === rOrig16.cell && r.inset === rOrig16.inset && r.radius === rOrig16.radius &&
+        r.cell === CFG.CELL && r.inset === CFG.CELL_INSET && r.radius === CFG.CELL_RADIUS,
+        '大盘面 ' + r.cell + '/' + r.inset + '/' + r.radius +
+        '　基准版 ' + rOrig16.cell + '/' + rOrig16.inset + '/' + rOrig16.radius);
+  check('方块设备像素边长与基准版相等（26 × dpr）',
+        blockPx(r) === blockPx(rOrig16) && blockPx(r) === 26 * r.scale,
+        blockPx(r) + ' px vs 基准版 ' + blockPx(rOrig16) + ' px');
+  // inset 取非整数（例如按比例算出的 1.5）会让方块边界在半像素上被抗锯齿糊出灰边。
+  check('内缩为整数（任意 dpr 下才能像素对齐）',
+        r.inset === Math.round(r.inset) && r.inset > 0 && r.inset < r.cell / 2,
+        'inset = ' + r.inset);
+
+  // 强度场按**绝对列**铺满数据宽度（平移画布时不用搬家），不是按视口
+  check('微光场是 48 行 × 1024 列（数据宽度）',
+        r.glow.length === 48 && r.glow[0].length === 1024,
+        r.glow.length + '×' + r.glow[0].length);
+  // 光晕层比画布小是**故意的**（它要模糊，按画布分辨率渲染是浪费面积），
+  // 但宽高比必须与网格一致，否则放大后会拉伸。数值来自 large-config 的调参，
+  // 改那里的话这里要同步。
+  check('光晕图层与视口同宽高比（放大不拉伸）',
+        r.glowH * r.viewCols === r.glowW * r.rows,
+        r.glowW + '×' + r.glowH + '  vs 视口 ' + r.viewCols + '×' + r.rows);
+  check('光晕图层低于画布分辨率（省掉无谓面积）',
+        r.glowW === 512 && r.glowH === 384 && r.glowW < r.w,
+        r.glowW + '×' + r.glowH + ' < ' + r.w + '×' + r.h);
+  check('光晕图层的采样画布 = viewCols × rows',
+        r.glowSmall.width === r.viewCols && r.glowSmall.height === 48,
+        r.glowSmall.width + '×' + r.glowSmall.height);
+
+  function snapshot(rr) {
+    return rr.patternLayer.getContext('2d').getImageData(0, 0, rr.devW, rr.devH).data;
+  }
+  function samePixels(a, b) {
+    if (a.length !== b.length) return false;
+    for (var k = 0; k < a.length; k++) if (a[k] !== b[k]) return false;
+    return true;
+  }
+
+  rg.set(40, 20, true);
+  rg.set(3, 31, true);
+  var pxFull = snapshot(r);
+  r.drawPattern();
+  check('矩形下整层重绘可重现（确定性）', samePixels(pxFull, snapshot(r)));
+
+  rg.set(63, 0, true);                          // 走局部重绘（drawCell）
+  var pxIncr = snapshot(r);
+  r.drawPattern();
+  check('矩形下局部重绘 == 整层重绘（开格）', samePixels(pxIncr, snapshot(r)));
+
+  rg.set(40, 20, false);
+  var pxOff = snapshot(r);
+  r.drawPattern();
+  check('矩形下局部重绘 == 整层重绘（关格）', samePixels(pxOff, snapshot(r)));
+
+  // flash 的越界判断必须分别看 cols 与 rows
+  var rf = new TM.Renderer(canvas, new TM.Grid(), ropts());
+  check('flash 在矩形内的合法格返回 true',
+        rf.flash(63, 31) === true && rf.flash(16, 20) === true);
+  // 数据宽 1024 列，所以列越界要用 1024 判（行仍然是 48）
+  check('flash 越界返回 false（列/行分别判定）',
+        rf.flash(1024, 0) === false &&    // 列越界（数据宽 1024）、行合法
+        rf.flash(10, 48) === false &&     // 行越界、列合法
+        rf.flash(16, 48) === false);      // 行数从 36 涨到 48，(16,40) 已经不越界了
+  rf.highlights.length = 0;
+  check('flash 不改动图案', rf.grid.count() === 0);
+
+  // ── 5. 微光：点亮当前列、不向邻居扩散、约 0.4 秒熄灭 ────
+  var wg = new TM.Grid();
+  var wr = new TM.Renderer(canvas, wg, ropts());
+  wg.set(40, 5, true);
+  check('点格子会点亮该格（glow[行][列]）', wr.glow[5][40] === 1,
+        'glow[5][40] = ' + wr.glow[5][40]);
+
+  wr.stepGlow(40);                              // 播放到第 40 列
+  check('点亮当前列', wr.glow[5][40] === 1, '= ' + wr.glow[5][40]);
+  check('相邻列不发光（不是涟漪，没有扩散）', wr.glow[5][41] === 0,
+        'glow[5][41] = ' + wr.glow[5][41]);
+
+  wr.stepGlow(41, false);                       // 只衰减
+  var dim1 = wr.glow[5][40];
+  wr.stepGlow(41, false);
+  check('逐帧衰减且单调', dim1 < 1 && wr.glow[5][40] < dim1,
+        dim1.toFixed(3) + ' → ' + wr.glow[5][40].toFixed(3));
+
+  for (var w = 0; w < 90; w++) wr.stepGlow(63, false);   // 无输入 → 应熄灭
+  var maxGlow = 0;
+  for (var wy = 0; wy < 48; wy++) {
+    for (var wx = 0; wx < 64; wx++) maxGlow = Math.max(maxGlow, wr.glow[wy][wx]);
+  }
+  check('无输入时整张 48 × 64 的场都会熄灭', maxGlow === 0,
+        'max glow = ' + maxGlow);
+
+  // 满列播放 12 帧：亮度上限是 1，不该有任何累积
+  var bg = new TM.Grid();
+  var br = new TM.Renderer(canvas, bg, ropts());
+  for (var bc = 0; bc < 48; bc++) bg.set(10, bc, true);
+  for (var bf = 0; bf < 12; bf++) br.stepGlow(10, true);
+  var peak = 0;
+  for (var by = 0; by < 48; by++) {
+    for (var bx = 0; bx < 64; bx++) peak = Math.max(peak, br.glow[by][bx]);
+  }
+  check('满列播放时亮度饱和在 1（不会累积）', peak === 1, 'peak = ' + peak);
+
+  // 关闭微光要清空整张 48 × 64 的场，不能只清 16 × 16
+  br.setGlowEnabled(false);
+  var zeroed = true;
+  for (var zy = 0; zy < 48; zy++) {
+    for (var zx = 0; zx < 64; zx++) {
+      if (br.glow[zy][zx] !== 0) zeroed = false;
+    }
+  }
+  check('关闭微光清空整张矩形亮度场', zeroed);
+
+  // 播放列高亮宽度应等于格子宽度
+  var cg = new TM.Grid();
+  var cr = new TM.Renderer(canvas, cg, ropts());
+  cr.showGlow = false;
+  cr.composite(59);                             // 高亮第 59 列（基准版只有 0..15）
+  var cctx = cr.ctx;
+  function lumAtLogical(x, y) {
+    var d = cctx.getImageData(Math.round(x * cr.scale), Math.round(y * cr.scale), 1, 1).data;
+    return d[0];
+  }
+  var inCol = lumAtLogical(59 * 32 + 16, 200);   // 第 59 列内
+  var outCol = lumAtLogical(60 * 32 + 16, 200);  // 第 60 列内
+  check('播放列高亮落在第 59 列', inCol > outCol + 5,
+        '第59列 ' + inCol + ' vs 第60列 ' + outCol);
+
+  // ── 6. 页面级：真实 large.html ─────────────────────────
+  var frame = document.getElementById('app');
+
+  function wait(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
+  async function waitFor(fn, limit, label) {
+    var waited = 0;
+    while (waited < limit) {
+      try { if (fn()) return true; } catch (e) { /* 忽略 */ }
+      await wait(40); waited += 40;
+    }
+    if (label) info('轮询超时', label);
+    return false;
+  }
+
+  function runPage() {
+    return new Promise(function (resolve) {
+      var settled = false;
+      function go() {
+        if (settled) return;
+        settled = true;
+        resolve();
+      }
+      frame.addEventListener('load', function () {
+        checkPage(frame, check, info, waitFor)
+          .then(function () { return checkDemoParam(); })
+          .then(go, function (e) {
+            check('页面级自检未抛异常', false, String(e && e.message || e));
+            go();
+          });
+      });
+      setTimeout(go, 9000);                     // iframe 没加载也要收尾
+    });
+  }
+
+  /**
+   * `?demo=<id>`：另开一个 iframe 带上参数，确认它把示例装好了、且**不自动播放**。
+   * 顺带对照主 iframe 的「初始网格为空」—— 不带参数时不该自己装谱。
+   */
+  function checkDemoParam() {
+    return new Promise(function (resolve) {
+      var f = document.createElement('iframe');
+      f.width = 900; f.height = 900;
+      f.style.cssText = 'position:absolute;left:-9999px;top:0;border:0';
+      f.src = '../large.html?debug=1&demo=dango';
+
+      var done = false;
+      function finish() { if (done) return; done = true; resolve(); }
+
+      f.addEventListener('load', function () {
+        (async function () {
+          var win2 = f.contentWindow;
+          var ready = await waitFor(function () { return !!win2.__matrixMusicDebug; },
+                                    4000, '等待 demo 页启动');
+          check('?demo=dango 能启动页面', ready);
+          if (ready) {
+            var d2 = win2.__matrixMusicDebug;
+            check('?demo=dango 打开就装好了全曲（785 音）',
+                  d2.grid.count() === 785, 'count = ' + d2.grid.count());
+            check('?demo=dango 的回环铺到第 896 列',
+                  d2.sequencer.loopIn === 0 && d2.sequencer.loopOut === 896,
+                  d2.sequencer.loopIn + '..' + d2.sequencer.loopOut);
+            check('?demo=dango **不**自动开始播放（要人按播放）',
+                  d2.sequencer.playing === false, 'playing = ' + d2.sequencer.playing);
+          }
+          finish();
+        })();
+      });
+      document.body.appendChild(f);
+      setTimeout(finish, 8000);
+    });
+  }
+
+  async function checkPage(frameEl, check, info, waitFor) {
+    var win = frameEl.contentWindow, doc = frameEl.contentDocument;
+    if (!doc) { check('能访问 iframe 文档', false, 'contentDocument 为空'); return; }
+    win.addEventListener('error', function (e) {
+      check('large.html 内无未捕获错误', false, e.message + ' @' + e.lineno);
+    });
+    // large-config.js 真的生效了：RUNTIME 被换成了另一张音表，
+    // 而 CONFIG 那份基准版音表原封不动
+    check('页面 RUNTIME 是独立于 CONFIG.NOTES 的新音表',
+          win.TM.RUNTIME.notes !== win.TM.CONFIG.NOTES &&
+          win.TM.RUNTIME.notes.length === 48 &&
+          win.TM.CONFIG.NOTES.length === 16 &&
+          win.TM.RUNTIME.cols === 1024 && win.TM.RUNTIME.cell === win.TM.CONFIG.CELL);
+
+    var ready = await waitFor(function () { return !!win.__matrixMusicDebug; }, 3000,
+                              '等待 large.html 启动');
+    check('large.html 带 ?debug=1 暴露句柄', ready);
+    if (!ready) return;
+
+    var dbg = win.__matrixMusicDebug;
+    check('页面网格 = 1024 列 × 48 行',
+          dbg.grid.cols === 1024 && dbg.grid.rows === 48,
+          dbg.grid.cols + '×' + dbg.grid.rows);
+    check('页面音序器音表 48 个音（半音阶）',
+          dbg.sequencer.notes.length === 48, dbg.sequencer.notes.length + '');
+    check('页面最高音 = A7 (108)，比基准版最高音高一个八度',
+          dbg.sequencer.notes[0] === win.TM.CONFIG.NOTES[0] + 12,
+          dbg.sequencer.notes[0] + '');
+    check('页面音表相邻行差 1 个半音',
+          dbg.sequencer.notes.every(function (n, i, a) {
+            return i === 0 || a[i - 1] - n === 1;
+          }), dbg.sequencer.notes.slice(0, 5).join(','));
+    var pageNotes = dbg.sequencer.notes;
+    check('页面音表每八度 12 个音级（半音阶）', (function () {
+      var set = {};
+      pageNotes.forEach(function (n) { set[((n - 72) % 12 + 12) % 12] = 1; });
+      return Object.keys(set).length === 12;
+    })(), pageNotes.slice(0, 12).join(','));
+    check('页面音表覆盖基准版音域（只差最低的 A3）', (function () {
+      var miss = win.TM.CONFIG.NOTES.filter(function (n) {
+        return pageNotes.indexOf(n) < 0;
+      });
+      return miss.length === 1 && miss[0] === 60;
+    })(), '96 → ' + pageNotes[pageNotes.length - 1]);
+
+    var canvas = doc.getElementById('matrix');
+    var R3 = dbg.renderer;
+
+    // 视口渲染的第一条：画布只覆盖可见列，数据比视口宽得多
+    check('视口列数远小于数据宽度（确实是视口渲染）',
+          R3.viewCols > 8 && R3.viewCols < dbg.grid.cols,
+          '视口 ' + R3.viewCols + ' 列 / 数据 ' + dbg.grid.cols + ' 列');
+    check('画布设备尺寸 = 视口宽 × 行高 × dpr',
+          canvas.width === Math.round(R3.w * R3.scale) &&
+          canvas.height === Math.round(1536 * R3.scale),
+          canvas.width + '×' + canvas.height + '（视口 ' + R3.w + '×' + R3.h + '）');
+    check('页面标题为 Large 版', /Large/.test(doc.title), doc.title);
+
+    // ── 坐标换算：列 → 屏幕 x（跟着当前视口走）────────────
+    var rect = canvas.getBoundingClientRect();
+    function xOf(col) {
+      var v0 = dbg.renderer.viewCol0, vc = dbg.renderer.viewCols;
+      return rect.left + rect.width * ((col - v0 + 0.5) / vc);
+    }
+    function yOf(row) { return rect.top + rect.height * ((row + 0.5) / 48); }
+
+    var wrap = doc.querySelector('.canvas-wrap');
+    check('棋盘宽度 = 视口宽度（不再是写死的 2048）',
+          Math.abs(parseFloat(win.getComputedStyle(wrap).width) - R3.w) < 1.5,
+          win.getComputedStyle(wrap).width + ' vs 视口 ' + R3.w);
+
+    // 这一条是「方块与基准版一样大」在上屏环节的保证：CSS 尺寸必须等于逻辑尺寸
+    check('画布 1:1 上屏（CSS 尺寸 = 逻辑尺寸，未缩放）',
+          Math.abs(rect.width - R3.w) < 1.5 && Math.abs(rect.height - R3.h) < 1.5,
+          Math.round(rect.width) + '×' + Math.round(rect.height));
+
+    // ── 滚动被收进框里 ─────────────────────────────────────
+    var frameEl = doc.querySelector('.board-frame');
+    check('棋盘套在 .board-frame 滚动框内', !!frameEl && frameEl.contains(wrap));
+    // 横向不再用原生滚动条（平移靠手势），纵向照旧可滚
+    check('滚动框：横向隐藏、纵向可滚',
+          win.getComputedStyle(frameEl).overflowX === 'hidden' &&
+          win.getComputedStyle(frameEl).overflowY === 'auto',
+          win.getComputedStyle(frameEl).overflowX + ' / ' +
+          win.getComputedStyle(frameEl).overflowY);
+    check('整页自身不滚动（滚动收在框内）',
+          win.getComputedStyle(doc.body).overflow === 'hidden',
+          'body.overflow = ' + win.getComputedStyle(doc.body).overflow);
+
+    // ── 顶栏式布局（2026-10-24 改版）──────────────────────
+    // 原来：标题 + 一大块控件 + 三段页脚，棋盘只分到中间一小条。
+    // 现在：一条 .topbar 装下全部，棋盘吃掉剩下的高度。
+    check('大面板是顶栏式布局（一条 .topbar 装完标题/简介/操作/参数）',
+          !!doc.querySelector('.topbar'));
+    check('旧的三段式已移除（.head / .controls / .foot）',
+          !doc.querySelector('.head') && !doc.querySelector('.controls') &&
+          !doc.querySelector('.foot'));
+
+    check('棋盘吃掉顶栏以下的高度（不是被控件挤在中间）', (function () {
+      var bar = doc.querySelector('.topbar').getBoundingClientRect();
+      var fr = doc.querySelector('.board-frame').getBoundingClientRect();
+      return bar.height < 90 && fr.top - bar.bottom < 4 && fr.height > 300;
+    })());
+
+    // 两个面板之间要能互相走：index 的页脚有大面板入口，大面板的顶栏要回得去
+    var backLink = doc.getElementById('link-small');
+    check('顶栏有回基准版的入口（href=index.html）',
+          !!backLink && /(^|\/)index\.html$/.test(backLink.getAttribute('href')),
+          backLink ? backLink.getAttribute('href') : '缺失');
+
+    check('微光 / 播放列按钮已移除，且仍默认开启',
+          !doc.getElementById('btn-glow') && !doc.getElementById('btn-playhead') &&
+          dbg.renderer.showGlow === true && dbg.renderer.showPlayhead === true,
+          'showGlow=' + dbg.renderer.showGlow + ' showPlayhead=' + dbg.renderer.showPlayhead);
+
+    // 谱子是**浮层**：展开不挤动棋盘（以前会把棋盘往下推）
+    var boardH0 = doc.querySelector('.board-frame').getBoundingClientRect().height;
+    doc.getElementById('btn-share').click();
+    var shareBox = doc.getElementById('share-row');
+    check('谱子展开是浮层（position: absolute）',
+          win.getComputedStyle(shareBox).position === 'absolute',
+          win.getComputedStyle(shareBox).position);
+    check('展开谱子不会挤动棋盘',
+          Math.abs(doc.querySelector('.board-frame').getBoundingClientRect().height - boardH0) < 1,
+          boardH0 + ' → ' +
+          doc.querySelector('.board-frame').getBoundingClientRect().height);
+    doc.getElementById('btn-share').click();
+    check('再点一次收起', shareBox.hidden === true);
+
+    // 「?」= 快捷键与手势浮层；点外面收起
+    var helpBtnEl = doc.getElementById('btn-help');
+    var helpPop = doc.getElementById('help-pop');
+    check('有「?」帮助按钮与浮层', !!helpBtnEl && !!helpPop);
+    helpBtnEl.click();
+    check('点「?」弹出快捷键浮层', helpPop.hidden === false);
+    doc.body.dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true }));
+    check('点浮层外面会收起', helpPop.hidden === true);
+
+    // ── 播放位置标尺 ───────────────────────────────────────
+    var rulerEl = doc.getElementById('ruler');
+    var rulerRect = rulerEl.getBoundingClientRect();
+    check('大面板有播放位置标尺', !!rulerEl && !!doc.getElementById('ruler-cursor'));
+    check('标尺宽度 = 画布宽度（位置才能对应到列）',
+          Math.abs(rulerRect.width - rect.width) < 1.5,
+          Math.round(rulerRect.width) + ' vs ' + Math.round(rect.width));
+    // 游标是「一整格」宽的块，宽度靠 CSS 的 calc(100% / var(--cols)) 算。
+    // 曾经这里被旧代码覆盖成 grid.cols（1024，数据宽度），于是首屏游标是根细线，
+    // 要等改窗口触发重算才恢复 —— 这两条把它钉住。
+    check('--cols 写的是**可见列数**，不是数据宽度', (function () {
+      var v = parseInt(win.getComputedStyle(doc.documentElement)
+        .getPropertyValue('--cols'), 10);
+      return v === dbg.renderer.viewCols;
+    })(), '--cols=' + win.getComputedStyle(doc.documentElement)
+         .getPropertyValue('--cols') + ' / viewCols=' + dbg.renderer.viewCols);
+    check('首屏游标就是一整格宽（不是细线）', (function () {
+      var w = parseFloat(win.getComputedStyle(doc.getElementById('ruler-cursor')).width);
+      return Math.abs(w - dbg.renderer.cell) < 1.5;
+    })(), '游标 ' + win.getComputedStyle(doc.getElementById('ruler-cursor')).width +
+         ' vs 一格 ' + dbg.renderer.cell + 'px');
+
+    check('标尺在滚动框里纵向吸顶（滚到棋盘下半部分也够得着）',
+          win.getComputedStyle(rulerEl).position === 'sticky' &&
+          win.getComputedStyle(rulerEl).top === '0px',
+          win.getComputedStyle(rulerEl).position + ' / ' +
+          win.getComputedStyle(rulerEl).top);
+
+    rulerEl.dispatchEvent(new win.PointerEvent('pointerdown', {
+      clientX: rulerRect.left + rulerRect.width * 0.5,
+      clientY: rulerRect.top + rulerRect.height / 2,
+      bubbles: true, cancelable: true, pointerId: 31, isPrimary: true
+    }));
+    check('点标尺正中 → 视口中央那一列',
+          dbg.sequencer.currentStep === R3.viewCol0 + Math.floor(R3.viewCols / 2),
+          'currentStep = ' + dbg.sequencer.currentStep +
+          '（视口 ' + R3.viewCol0 + '..' + (R3.viewCol0 + R3.viewCols - 1) + '）');
+
+    // ── 命中测试：坐标要跟着视口走 ─────────────────────────
+    function tapCell(col, row, pointerId) {
+      canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+        clientX: xOf(col), clientY: yOf(row),
+        bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
+      }));
+    }
+
+    check('初始网格为空', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+
+    var lastVisible = R3.viewCol0 + R3.viewCols - 1;
+    tapCell(lastVisible, 47, 1);
+    var lit = await waitFor(function () { return dbg.grid.get(lastVisible, 47) === true; }, 1500);
+    check('点视口最右一列（第 ' + lastVisible + ' 列）点亮它', lit,
+          'count = ' + dbg.grid.count());
+    check('只点亮一格（未串位）', dbg.grid.count() === 1, 'count = ' + dbg.grid.count());
+
+    tapCell(0, 0, 2);
+    var lit2 = await waitFor(function () { return dbg.grid.get(0, 0) === true; }, 1500);
+    check('点左上角点亮 cell(0,0)', lit2);
+    check('两格互不影响',
+          dbg.grid.get(lastVisible, 47) === true && dbg.grid.count() === 2,
+          'count = ' + dbg.grid.count());
+
+    // ── 横向平移：无限画布的核心 ───────────────────────────
+    var v0Before = R3.viewCol0;
+    frameEl.dispatchEvent(new win.WheelEvent('wheel', {
+      deltaX: 320, deltaY: 0, bubbles: true, cancelable: true
+    }));
+    await wait(80);
+    check('横向滚轮 / 触控板横滑能平移视口',
+          R3.viewCol0 === v0Before + Math.round(320 / R3.cell),
+          R3.viewCol0 + '（从 ' + v0Before + ' 起，滚了 320px）');
+
+    // 平移之后命中测试必须仍旧准：点第一列，落点应是新的起始列
+    var v0After = R3.viewCol0;
+    tapCell(v0After, 10, 3);
+    var litPan = await waitFor(function () { return dbg.grid.get(v0After, 10) === true; }, 1500);
+    check('平移后点击落在视口第一列（坐标跟着视口走）', litPan,
+          '第 ' + v0After + ' 列');
+
+    // 往回滚，回到 0
+    frameEl.dispatchEvent(new win.WheelEvent('wheel', {
+      deltaX: -320, deltaY: 0, bubbles: true, cancelable: true
+    }));
+    await wait(80);
+    check('往回滚能回到起始列', R3.viewCol0 === v0Before, R3.viewCol0 + '');
+
+    // 大面板上「画到很右边」是这次改造的目的：第 900 列也写得进去
+    dbg.grid.set(900, 20, true);
+    check('数据宽度内的远端列（900）可写可读',
+          dbg.grid.get(900, 20) === true, 'count = ' + dbg.grid.count());
+    dbg.grid.set(900, 20, false);
+
+    // 自动保存写的是**大面板自己的键**（matrixmusic.score.large），不会盖掉基准版的存档。
+    await wait(600);
+    var storedLarge = null;
+    try { storedLarge = localStorage.getItem('matrixmusic.score.large'); } catch (e) { /* 忽略 */ }
+    check('改动自动存进 matrixmusic.score.large（键不含尺寸）',
+          storedLarge === win.TM.Store.encode(
+            dbg.grid, win.TM.RUNTIME.notes,
+            { bpm: dbg.sequencer.tempo, vol: parseInt(doc.getElementById('volume').value, 10),
+              loopIn: dbg.sequencer.loopIn, loopOut: dbg.sequencer.loopOut }),
+          storedLarge ? storedLarge.slice(0, 18) + '…' : '没读到');
+
+    // ── 面板里的代码实时同步 + 撤销 ────────────────────────
+    doc.getElementById('btn-share').click();
+    var shareCodeEl = doc.getElementById('share-code');
+    var codeBefore = shareCodeEl.value;
+
+    tapCell(20, 20, 61);
+    var lit20 = await waitFor(function () { return dbg.grid.get(20, 20) === true; }, 1500);
+    check('大面板：面板展开时，代码跟着格子实时更新',
+          lit20 && shareCodeEl.value !== codeBefore &&
+          shareCodeEl.value === win.TM.Store.encode(
+            dbg.grid, win.TM.RUNTIME.notes,
+            { bpm: dbg.sequencer.tempo, vol: parseInt(doc.getElementById('volume').value, 10),
+              loopIn: dbg.sequencer.loopIn, loopOut: dbg.sequencer.loopOut }),
+          shareCodeEl.value.slice(0, 16) + '…');
+
+    win.dispatchEvent(new win.KeyboardEvent('keydown', {
+      key: 'z', metaKey: true, bubbles: true, cancelable: true
+    }));
+    check('大面板：⌘Z 撤销刚才那一格', dbg.grid.get(20, 20) === false,
+          'cell(20,20) = ' + dbg.grid.get(20, 20));
+
+    // ── 框选：先平移到第 50 列附近，再拖 ───────────────────
+    frameEl.dispatchEvent(new win.WheelEvent('wheel', {
+      deltaX: 50 * R3.cell, deltaY: 0, bubbles: true, cancelable: true
+    }));
+    await wait(80);
+
+    function altDragCell(c0, r0, c1, r1, pointerId) {
+      canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+        clientX: xOf(c0), clientY: yOf(r0), altKey: true,
+        bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
+      }));
+      canvas.dispatchEvent(new win.PointerEvent('pointermove', {
+        clientX: xOf(c1), clientY: yOf(r1), altKey: true,
+        bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
+      }));
+      canvas.dispatchEvent(new win.PointerEvent('pointerup', {
+        clientX: xOf(c1), clientY: yOf(r1),
+        bubbles: true, pointerId: pointerId, isPrimary: true
+      }));
+    }
+
+    var selBase = R3.viewCol0;
+    altDragCell(selBase + 2, 40, selBase + 7, 45, 71);
+    var bigSel = R3.selection;
+    check('平移后 Alt 拖动拉出选区（命中按视口算）',
+          !!bigSel && bigSel.col0 === selBase + 2 && bigSel.row0 === 40 &&
+          bigSel.col1 === selBase + 7 && bigSel.row1 === 45,
+          bigSel ? JSON.stringify(bigSel) : '无选区');
+
+    // 点棋盘框**之外**的留白要取消选择
+    doc.body.dispatchEvent(new win.PointerEvent('pointerdown', {
+      bubbles: true, cancelable: true, pointerId: 81, isPrimary: true
+    }));
+    check('大面板：点画布外的留白会取消选择', R3.selection === null,
+          JSON.stringify(R3.selection));
+
+    // ── 合成一帧，确认渲染链路跑得动 ───────────────────────
+    // 采样前关掉微光和播放列：两者都是合成层叠加，会把格子颜色改掉
+    R3.setGlowEnabled(false);
+    R3.showPlayhead = false;
+    // 回环形状也会上色（区间内有一层 4.5% 白、区间外压暗），
+    // 要看纯格子色就先把回环铺满整条数据宽度
+    R3.setLoop(0, dbg.grid.cols - 1);
+    dbg.grid.set(selBase + 3, 47, true);
+    R3.composite(selBase + 3);
+    var probeX = Math.round((selBase + 3 - R3.viewCol0 + 0.5) * R3.cell * R3.scale);
+    var probeY = Math.round(47.5 * R3.cell * R3.scale);
+    var got = canvas.getContext('2d')
+      .getImageData(probeX, probeY, 1, 1).data;
+    var noteLast = win.TM.RUNTIME.notes[win.TM.RUNTIME.notes.length - 1];
+    var wantHex = win.TM.CONFIG.COLORS.octaveOn[Math.floor(noteLast / 12)];
+    var want = [
+      parseInt(wantHex.slice(1, 3), 16),
+      parseInt(wantHex.slice(3, 5), 16),
+      parseInt(wantHex.slice(5, 7), 16)
+    ];
+    check('合成后最下一行确实是亮格（含视口偏移）',
+          Math.abs(got[0] - want[0]) <= 2 && Math.abs(got[1] - want[1]) <= 2 &&
+          Math.abs(got[2] - want[2]) <= 2,
+          '[' + got[0] + ',' + got[1] + ',' + got[2] + '] 期望 [' + want.join(',') + ']');
+
+    // ── 示例：大面板拿到的是**全曲**，16 列面板拿节选 ──────
+    // 同一首曲子两份代码（presets.js 的 code / codeSmall），按 RUNTIME.scrollX 挑。
+    var chips = doc.querySelectorAll('#presets .chip');
+    check('大面板有示例 chip', chips.length === 1, chips.length + ' 个');
+    chips[0].click();
+    var fullOk = await waitFor(function () { return dbg.grid.count() === 785; }, 4000,
+                               '等待全曲载入');
+    check('点示例载入全曲（785 音，不是 16 列面板那份 20 音的节选）',
+          fullOk, 'count = ' + dbg.grid.count());
+    check('全曲的回环铺到第 896 列',
+          dbg.sequencer.loopIn === 0 && dbg.sequencer.loopOut === 896,
+          dbg.sequencer.loopIn + '..' + dbg.sequencer.loopOut);
+    check('全曲自带 50 BPM / 音量 100',
+          dbg.sequencer.tempo === 50 &&
+          doc.getElementById('volume').value === '100',
+          dbg.sequencer.tempo + ' BPM / ' + doc.getElementById('volume').value);
+  }
+
+  runPage().then(report, function (e) {
+    check('页面级自检未抛异常', false, String(e && e.message || e));
+    report();
+  });
+})();
+</script>
+</body>
+</html>

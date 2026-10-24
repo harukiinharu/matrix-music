@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>perf</title></head>
+<body><pre id="out">…</pre>
+<canvas id="c" width="16" height="16"></canvas>
+<script src="../src/constants.js"></script>
+<script src="../src/grid.js"></script>
+<script src="../src/renderer.js"></script>
+<script>
+var TM = window.TM;
+var qs = new URLSearchParams(location.search);
+function num(k, d) { return qs.has(k) ? parseFloat(qs.get(k)) : d; }
+
+TM.CONFIG.BLUR_CELL = num('cell', TM.CONFIG.BLUR_CELL);
+TM.CONFIG.GLOW_SIZE = num('glow', TM.CONFIG.GLOW_SIZE);
+TM.CONFIG.GLOW_BLUR = num('gblur', TM.CONFIG.GLOW_BLUR);
+
+var lines = [];
+var host = document.getElementById('c');
+var grid = new TM.Grid();
+var r = new TM.Renderer(host, grid);
+var patternCtx = r.patternLayer.getContext('2d');
+var glowCtx = r.glowBig.getContext('2d');
+
+// canvas 绘制是异步提交的，必须强制同步才能量到真实光栅化成本。
+// 关键是同步**对应的那个 canvas** —— 只 flush 主画布量不到离屏图层的工作。
+function bench(n, fn, flushCtx) {
+  fn();
+  var t0 = performance.now();
+  for (var i = 0; i < n; i++) {
+    fn();
+    if (flushCtx) flushCtx.getImageData(0, 0, 1, 1);
+  }
+  return (performance.now() - t0) / n;
+}
+
+var sync = bench(8, function () {}, patternCtx);
+// 拖动时每跨一格触发一次。blurCell>0 时 drawCell 会回退成整层重绘，
+// 正好还原改动前的行为。
+var cell = bench(16, function () { r.drawCell(3, 4); }, patternCtx);
+var sim = bench(12, function () { r.stepGlow(3); }, glowCtx);
+
+lines.push('config  BLUR_CELL=' + TM.CONFIG.BLUR_CELL +
+           '  GLOW_SIZE=' + TM.CONFIG.GLOW_SIZE +
+           '  GLOW_BLUR=' + TM.CONFIG.GLOW_BLUR);
+lines.push('格子层 ' + r.devSize + 'px   dpr=' + (window.devicePixelRatio || 1));
+lines.push('拖动每跨一格: ' + Math.max(cell - sync, 0).toFixed(3) + ' ms');
+lines.push('微光推进每帧: ' + Math.max(sim - sync, 0).toFixed(3) + ' ms');
+
+document.getElementById('out').textContent = lines.join('\n');
+document.title = 'DONE';
+</script>
+</body></html>

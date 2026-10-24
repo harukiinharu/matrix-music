@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Matrix Music 自检</title>
+</head>
+<body>
+<canvas id="tcanvas" width="16" height="16"></canvas>
+<pre id="results">running…</pre>
+<script src="../src/constants.js"></script>
+<script src="../src/grid.js"></script>
+<script src="../src/audio.js"></script>
+<script src="../src/sequencer.js"></script>
+<script src="../src/renderer.js"></script>
+<script src="../src/storage.js"></script>
+<script>
+(function () {
+  var TM = window.TM, CFG = TM.CONFIG;
+  var lines = [], pass = 0, fail = 0;
+
+  function check(name, ok, detail) {
+    (ok ? pass++ : fail++);
+    lines.push((ok ? 'PASS  ' : 'FAIL  ') + name + (detail ? '   ' + detail : ''));
+  }
+  function info(name, detail) {
+    lines.push('INFO  ' + name + (detail ? '   ' + detail : ''));
+  }
+  function near(a, b, tol) { return Math.abs(a - b) <= tol; }
+
+  // 出错或超时也要把结果落到 DOM，否则无头抓取只能看到 "running…"
+  var done = false;
+  function report() {
+    if (done) return;
+    done = true;
+    lines.unshift('Matrix Music 自检 —— ' + pass + ' 通过 / ' + fail + ' 失败');
+    lines.unshift('');
+    document.getElementById('results').textContent = lines.join('\n');
+    document.title = 'DONE ' + pass + '/' + (pass + fail);
+  }
+  window.addEventListener('error', function (ev) {
+    lines.push('JS ERROR: ' + ev.message + ' @line ' + ev.lineno);
+    fail++;
+    report();
+  });
+  window.addEventListener('unhandledrejection', function (ev) {
+    lines.push('PROMISE REJECT: ' + (ev.reason && ev.reason.message || ev.reason));
+    fail++;
+    report();
+  });
+  setTimeout(function () {
+    if (!done) {
+      lines.push('WATCHDOG: 8s 内未完成，可能卡在异步渲染');
+      fail++;
+      report();
+    }
+  }, 8000);
+
+  // ── 1. 音高换算 ────────────────────────────────────────
+  check('noteToFrequency(72) = 440 Hz', near(TM.noteToFrequency(72), 440, 1e-9),
+        TM.noteToFrequency(72).toFixed(4));
+  check('noteToFrequency(60) = 220 Hz', near(TM.noteToFrequency(60), 220, 1e-9),
+        TM.noteToFrequency(60).toFixed(4));
+  check('noteToFrequency(96) = 1760 Hz', near(TM.noteToFrequency(96), 1760, 1e-9),
+        TM.noteToFrequency(96).toFixed(4));
+  check('NOTES 表长度与内容', CFG.NOTES.length === 16 &&
+        CFG.NOTES[0] === 96 && CFG.NOTES[15] === 60, CFG.NOTES.join(','));
+
+  // ── 2. 时序 ────────────────────────────────────────────
+  check('barSeconds(120) = 2 s', near(TM.barSeconds(120), 2, 1e-12),
+        TM.barSeconds(120) + ' s');
+  check('stepSeconds(120) = 0.125 s', near(TM.stepSeconds(120), 0.125, 1e-12),
+        TM.stepSeconds(120) + ' s');
+  check('RESOLUTION = 16', CFG.RESOLUTION === 16);
+
+  // ── 3. 包络曲线 ────────────────────────────────────────
+  var curve = TM.buildEnvelopeCurve(96);
+  check('包络首值 = 0.4² = 0.16', near(curve[0], 0.16, 1e-6), curve[0].toFixed(8));
+  check('包络末值 = 0', curve[curve.length - 1] === 0);
+  var monotonic = true;
+  for (var i = 1; i < curve.length; i++) if (curve[i] > curve[i - 1]) monotonic = false;
+  check('包络单调递减（二次衰减）', monotonic);
+  check('包络中点 ≈ 0.16·0.25', near(curve[48], 0.16 * 0.25, 1e-3),
+        curve[48].toFixed(6));
+
+  // ── 4. 网格 ────────────────────────────────────────────
+  var g = new TM.Grid();
+  check('初始为空', g.count() === 0);
+  check('steps[列][行] 索引正确', (function () {
+    g.set(3, 5, true);
+    return g.get(3, 5) === true && g.get(5, 3) === false;
+  })(), 'set(3,5) → get(5,3) 应为 false');
+  check('toggle 返回值', g.toggle(3, 5) === false && g.get(3, 5) === false);
+  g.clear();
+  check('clear 生效', g.count() === 0);
+
+  // ── 4.5 拖动涂抹补齐（paintLine）───────────────────────
+  // 契约：涂 (from, to] —— 含终点、不含起点（起点那格已经在上一轮画过了）
+  var gl = new TM.Grid();
+  gl.paintLine({ col: 0, row: 0 }, { col: 3, row: 0 }, true);
+  check('水平拖动补齐 (from,to]，起点不动',
+        gl.get(1, 0) && gl.get(2, 0) && gl.get(3, 0) && !gl.get(0, 0) &&
+        gl.count() === 3, 'count = ' + gl.count());
+
+  var gl2 = new TM.Grid();
+  gl2.paintLine({ col: 0, row: 0 }, { col: 3, row: 3 }, true);
+  check('对角拖动补齐，无断点',
+        gl2.get(1, 1) && gl2.get(2, 2) && gl2.get(3, 3) && gl2.count() === 3,
+        'count = ' + gl2.count());
+
+  var gl3 = new TM.Grid();
+  gl3.set(2, 2, true);
+  gl3.paintLine({ col: 2, row: 2 }, { col: 2, row: 2 }, true);
+  check('原地拖动不重复计数', gl3.count() === 1, 'count = ' + gl3.count());
+
+  var gl4 = new TM.Grid();
+  gl4.paintLine(null, { col: 5, row: 6 }, true);
+  check('无起点时只涂终点一格', gl4.get(5, 6) && gl4.count() === 1);
+
+  var gl5 = new TM.Grid();
+  gl5.paintLine({ col: 15, row: 15 }, { col: 15, row: 0 }, true);
+  check('垂直拖动补齐 15 步', gl5.count() === 15 && gl5.get(15, 0),
+        'count = ' + gl5.count());
+
+  // ── 4.6 局部重绘必须与整层重绘等价 ─────────────────────
+  function snapshot(r) {
+    var D = r.devSize;
+    return r.patternLayer.getContext('2d').getImageData(0, 0, D, D).data;
+  }
+  function samePixels(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i2 = 0; i2 < a.length; i2++) if (a[i2] !== b[i2]) return false;
+    return true;
+  }
+  var gp = new TM.Grid();
+  var rp = new TM.Renderer(document.getElementById('tcanvas'), gp);
+  gp.set(2, 3, true);
+  gp.set(5, 9, true);
+  var pxFull = snapshot(rp);
+  rp.drawPattern();                       // 同一状态整层重绘
+  check('整层重绘可重现（确定性）', samePixels(pxFull, snapshot(rp)));
+
+  gp.set(7, 1, true);                     // 走 drawCell 局部重绘路径
+  var pxIncr = snapshot(rp);
+  rp.drawPattern();
+  check('开启格子后：局部重绘 == 整层重绘', samePixels(pxIncr, snapshot(rp)));
+
+  gp.set(2, 3, false);                    // 关格子同样走局部重绘
+  var pxOff = snapshot(rp);
+  rp.drawPattern();
+  check('关闭格子后：局部重绘 == 整层重绘', samePixels(pxOff, snapshot(rp)));
+  check('局部重绘确实省掉了整层重绘',
+        CFG.BLUR_CELL === 0, 'BLUR_CELL = ' + CFG.BLUR_CELL +
+        '（>0 时会回退到整层重绘）');
+
+  // ── 5. 微光（灯泡，不是涟漪）───────────────────────────
+  // 播放到某一列时，那一列亮着的格子瞬间亮起、随后衰减；**不向邻居传播**。
+  var grid2 = new TM.Grid();
+  var rnd = new TM.Renderer(document.getElementById('tcanvas'), grid2);
+  grid2.set(4, 7, true);
+  check('点格子会点亮该格（glow[行][列] = 1）', rnd.glow[7][4] === 1,
+        'glow[7][4] = ' + rnd.glow[7][4]);
+
+  rnd.stepGlow(4);
+  check('播放到该列时满亮', near(rnd.glow[7][4], 1, 1e-9), '= ' + rnd.glow[7][4]);
+
+  // 核心不变式：光停在格子里。四邻必须一动不动 —— 这就是「去掉涟漪」的含义。
+  check('相邻格没有被带动（不扩散）',
+        rnd.glow[7][3] === 0 && rnd.glow[7][5] === 0 &&
+        rnd.glow[6][4] === 0 && rnd.glow[8][4] === 0,
+        '左右上下 ' + [rnd.glow[7][3], rnd.glow[7][5],
+                       rnd.glow[6][4], rnd.glow[8][4]].join(','));
+
+  // 衰减：单调递减，约 0.4 秒收干净
+  rnd.stepGlow(15, false);                       // 不再点亮，只衰减
+  var g1 = rnd.glow[7][4];
+  rnd.stepGlow(15, false);
+  var g2 = rnd.glow[7][4];
+  check('逐帧衰减且单调', g1 < 1 && g2 < g1, g1.toFixed(3) + ' → ' + g2.toFixed(3));
+
+  for (var k = 0; k < 60; k++) rnd.stepGlow(15, false);
+  check('一秒内完全熄灭', rnd.glow[7][4] === 0, '= ' + rnd.glow[7][4]);
+
+  // 只点亮「亮着的」格子：空列走过时不该有亮斑
+  var ge = new TM.Grid();
+  var re = new TM.Renderer(document.getElementById('tcanvas'), ge);
+  re.stepGlow(5);
+  var anyGlow = 0;
+  for (var ey = 0; ey < 16; ey++) {
+    for (var ex = 0; ex < 16; ex++) anyGlow += re.glow[ey][ex];
+  }
+  check('空列不发光', anyGlow === 0, '总亮度 = ' + anyGlow);
+
+  // 点亮的是**当前列**：曾经打在 stepIndex + 1，光标还压在前一格目标格就先亮，
+  // 看起来就是「声音比游标早一格」。
+  var gs = new TM.Grid();
+  var rs = new TM.Renderer(document.getElementById('tcanvas'), gs);
+  gs.set(6, 2, true);
+  rs.glow[2][6] = 0;                        // 清掉点格子时的即时点亮
+  rs.stepGlow(6);
+  check('点亮当前列', rs.glow[2][6] === 1, '= ' + rs.glow[2][6]);
+  check('下一列不会被提前点亮', rs.glow[2][7] === 0, '= ' + rs.glow[2][7]);
+
+  // ── 5.2 微光开关 ───────────────────────────────────────
+  // 取整幅画布最亮的**通道值**（格子颜色带色相，只看红通道会漏掉蓝绿）
+  function maxBright(r) {
+    var D = r.devSize;
+    var d = r.ctx.getImageData(0, 0, D, D).data;
+    var m = 0, v;
+    for (var i = 0; i < d.length; i += 4) {
+      v = Math.max(d[i], d[i + 1], d[i + 2]);
+      if (v > m) m = v;
+    }
+    return m;
+  }
+
+  /** 某一行亮格的颜色（与渲染器同一套规则：行 → 音高 → 八度 → 取色） */
+  function onColorAt(row) {
+    var list = TM.CONFIG.COLORS.octaveOn;
+    var idx = Math.floor(TM.CONFIG.NOTES[row] / 12);
+    if (idx > list.length - 1) idx = list.length - 1;
+    return list[idx];
+  }
+
+  function maxHexChannel(hex) {
+    var v = parseInt(hex.slice(1), 16);
+    return Math.max((v >> 16) & 255, (v >> 8) & 255, v & 255);
+  }
+
+  var gw = new TM.Grid();
+  var rw = new TM.Renderer(document.getElementById('tcanvas'), gw);
+  rw.showPlayhead = false;
+  gw.set(3, 3, true);                       // 同时经 applyChange 点亮
+  for (var wi = 0; wi < 8; wi++) rw.stepGlow(3);   // 播放到第 3 列
+
+  check('微光开启时该格满亮', rw.glow[3][3] === 1, 'glow[3][3] = ' + rw.glow[3][3]);
+
+  rw.composite(2);
+  var brightOn = maxBright(rw);
+  var cellMax = maxHexChannel(onColorAt(3));   // 行 3 就是被点亮的那一行
+
+  rw.setGlowEnabled(false);
+  check('关闭后 showGlow = false', rw.showGlow === false);
+  check('关闭微光会清空亮度场（避免重新打开冒出冻结的旧亮斑）',
+        rw.glow[3][3] === 0, 'glow[3][3] = ' + rw.glow[3][3]);
+
+  gw.set(5, 5, true);
+  check('关闭后点格子不再点亮', rw.glow[5][5] === 0, 'glow[5][5] = ' + rw.glow[5][5]);
+
+  rw.composite(2);
+  var brightOff = maxBright(rw);
+  check('关闭微光后画面最亮就是亮格本色', Math.abs(brightOff - cellMax) <= 2,
+        brightOff + ' vs ' + cellMax + '（' + onColorAt(3) + '）');
+  check('开启微光时亮格被推得更亮', brightOn > brightOff,
+        brightOn + ' vs ' + brightOff);
+
+  // ── 5.3 暂停时必须停止点亮 ─────────────────────────────
+  // 暂停时步号冻结；若继续点亮同一列，等于给同一格反复充能。亮度上限是 1，
+  // 不会再像旧波动场那样指数爆炸，但画面会一直卡在全亮，看不出已经暂停。
+  var gz = new TM.Grid();
+  var rz = new TM.Renderer(document.getElementById('tcanvas'), gz);
+  for (var zc = 0; zc < 16; zc++) gz.set(5, zc, true);    // 满列
+
+  for (var zf = 0; zf < 8; zf++) rz.stepGlow(5, true);
+  check('播放节奏下满列亮度为 1', near(rz.glow[0][5], 1, 1e-9),
+        'glow = ' + rz.glow[0][5]);
+
+  // 反向验证：一直点亮也不会超过满亮度（旧波动场在这里会指数爆炸）
+  for (var bo = 0; bo < 900; bo++) rz.stepGlow(5, true);
+  check('持续点亮不会超过满亮度', rz.glow[0][5] === 1, 'glow = ' + rz.glow[0][5]);
+
+  for (var zo = 0; zo < 30; zo++) rz.stepGlow(5, false);   // 暂停 0.5 秒
+  check('暂停后亮度衰减到 10% 以下', rz.glow[0][5] < 0.1,
+        'glow = ' + rz.glow[0][5].toFixed(4));
+
+  for (var zp = 0; zp < 120; zp++) rz.stepGlow(5, false);
+  check('暂停两秒后完全熄灭', rz.glow[0][5] === 0, 'glow = ' + rz.glow[0][5]);
+
+  // ── 5.4 右键试听的临时描边（flash）─────────────────────
+  // 关键不变式：**只描边，不改填充**。否则暗格整体变亮，会被当成「右键改了格子状态」。
+  var gh = new TM.Grid();
+  var rh = new TM.Renderer(document.getElementById('tcanvas'), gh);
+  rh.showPlayhead = false;
+  rh.showGlow = false;                    // 关掉微光，隔离出描边
+  var HS = rh.scale;
+  function lumAt(r, col, row, dx, dy) {
+    return r.ctx.getImageData(
+      Math.round((col * CFG.CELL + dx) * HS),
+      Math.round((row * CFG.CELL + dy) * HS), 1, 1).data[0];
+  }
+
+  rh.composite(0);
+  var edgeBefore = lumAt(rh, 0, 0, 16, 1);     // 格子上边距（黑）
+  var fillBefore = lumAt(rh, 0, 0, 16, 16);    // 格子中心（填充色）
+  check('描边前：格子中心是暗色、边距是黑', fillBefore < 80 && edgeBefore < 20,
+        '中心 ' + fillBefore + '，边距 ' + edgeBefore);
+
+  check('flash(0,0) 返回 true', rh.flash(0, 0) === true);
+  check('flash 越界返回 false',
+        rh.flash(-1, 0) === false && rh.flash(16, 0) === false && rh.flash(0, 16) === false);
+
+  rh.composite(0);
+  var edgeDuring = lumAt(rh, 0, 0, 16, 1);
+  var fillDuring = lumAt(rh, 0, 0, 16, 16);
+  check('描边出现在格子边距上（变白）',
+        edgeDuring > 200 && edgeDuring > edgeBefore + 150,
+        edgeBefore + ' → ' + edgeDuring);
+  check('描边不改变格子填充色', Math.abs(fillDuring - fillBefore) <= 2,
+        fillBefore + ' → ' + fillDuring);
+  check('flash 不改动图案', gh.count() === 0, 'count = ' + gh.count());
+
+  for (var hi = 0; hi < rh.highlights.length; hi++) rh.highlights[hi].until = 0;
+  rh.composite(0);
+  check('描边到期后消失', lumAt(rh, 0, 0, 16, 1) <= edgeBefore + 2,
+        '回到 ' + lumAt(rh, 0, 0, 16, 1));
+  check('过期条目被清理', rh.highlights.length === 0);
+
+  // ── 5.45 框选高亮：只画在合成层，不碰格子图层 ───────────
+  var gsel = new TM.Grid();
+  var rsel = new TM.Renderer(document.getElementById('tcanvas'), gsel);
+  rsel.showGlow = false;
+  rsel.showPlayhead = false;
+
+  function selPix(r, col, row) {
+    var d = r.ctx.getImageData(
+      Math.round((col * CFG.CELL + CFG.CELL / 2) * r.scale),
+      Math.round((row * CFG.CELL + CFG.CELL / 2) * r.scale), 1, 1).data;
+    return { r: d[0], g: d[1], b: d[2] };
+  }
+
+  rsel.selection = null;
+  rsel.composite(0);
+  // 取基线：格子颜色现在按音高走，不同行本来就不是同一个色，所以每个采样点
+  // 都要跟自己「加选区之前」比，不能跨行互比。
+  var base = {
+    inBox: selPix(rsel, 4, 4),
+    outside: selPix(rsel, 9, 9),
+    edgeIn: selPix(rsel, 5, 5),
+    edgeOut: selPix(rsel, 6, 6),
+    otherRow: selPix(rsel, 4, 12)
+  };
+  check('未点亮的格子也带音高色（不同行不同色）',
+        !(base.inBox.r === base.otherRow.r && base.inBox.g === base.otherRow.g &&
+          base.inBox.b === base.otherRow.b),
+        JSON.stringify(base.inBox) + ' vs ' + JSON.stringify(base.otherRow));
+
+  rsel.selection = { col0: 2, row0: 2, col1: 5, row1: 5 };
+  rsel.composite(0);
+  var selIn = selPix(rsel, 4, 4);
+  var selOut = selPix(rsel, 9, 9);
+  check('选区内叠上中性高亮（三通道一起提亮）',
+        selIn.r > base.inBox.r && selIn.g > base.inBox.g && selIn.b > base.inBox.b,
+        JSON.stringify(base.inBox) + ' → ' + JSON.stringify(selIn));
+  check('选区外像素不受影响',
+        selOut.r === base.outside.r && selOut.g === base.outside.g &&
+        selOut.b === base.outside.b, JSON.stringify(selOut));
+  check('框选只画在合成层，格子图层像素不变', (function () {
+    // 采样点必须和 selPix 对齐到格子中心 —— 取格子左上角读到的是背景缝
+    var d = rsel.patternLayer.getContext('2d').getImageData(
+      Math.round((4 * CFG.CELL + CFG.CELL / 2) * rsel.scale),
+      Math.round((4 * CFG.CELL + CFG.CELL / 2) * rsel.scale), 1, 1).data;
+    return d[0] === base.inBox.r && d[1] === base.inBox.g && d[2] === base.inBox.b;
+  })());
+  check('同一个格子在选区内的 RGB 与选区外不同',
+        selIn.r !== selOut.r || selIn.g !== selOut.g || selIn.b !== selOut.b,
+        JSON.stringify(selIn) + ' vs ' + JSON.stringify(selOut));
+
+  // 边界要落在格子上，不能溢出选区
+  var selEdgeIn = selPix(rsel, 5, 5);
+  var selEdgeOut = selPix(rsel, 6, 6);
+  check('选区右下角内被提亮、紧邻外侧没有',
+        selEdgeIn.r > base.edgeIn.r && selEdgeIn.g > base.edgeIn.g &&
+        selEdgeIn.b > base.edgeIn.b &&
+        selEdgeOut.r === base.edgeOut.r && selEdgeOut.g === base.edgeOut.g &&
+        selEdgeOut.b === base.edgeOut.b,
+        '内 ' + JSON.stringify(selEdgeIn) + ' / 外 ' + JSON.stringify(selEdgeOut));
+
+  rsel.selection = null;
+  rsel.composite(0);
+  check('清掉选区后画面回到基线', (function () {
+    var p = selPix(rsel, 4, 4);
+    return p.r === base.inBox.r && p.g === base.inBox.g && p.b === base.inBox.b;
+  })());
+
+  // ── 5.5 音序器时基（视觉靠时间轴反查，不是公式推算）──────
+  function fakeAudio(latency) {
+    return {
+      ready: true,
+      ctx: { currentTime: 0 },
+      latency: latency || 0,
+      tempo: 120,
+      synthNote: function () {},
+      setTempo: function (b) { this.tempo = b; },
+      outputLatency: function () { return this.latency; }
+    };
+  }
+
+  var fa = fakeAudio(0);
+  var seq = new TM.Sequencer(fa, new TM.Grid());
+  // 手动铺一条排程：0→10.000, 1→10.125, 2→10.250（120 BPM）
+  seq._scheduleStep(0, 10.000);
+  seq._scheduleStep(1, 10.125);
+  seq._scheduleStep(2, 10.250);
+
+  check('排程前返回 null', seq.stepAtTime(9.999) === null);
+  check('步起点取该步', seq.stepAtTime(10.000) === 0, '给出 ' + seq.stepAtTime(10.000));
+  check('步内返回当前步', seq.stepAtTime(10.120) === 0, '给出 ' + seq.stepAtTime(10.120));
+  check('跨到下一步的瞬间切列', seq.stepAtTime(10.130) === 1, '给出 ' + seq.stepAtTime(10.130));
+  check('末步之后保持末步', seq.stepAtTime(99) === 2, '给出 ' + seq.stepAtTime(99));
+
+  // 改速度：后续步用新步长，已排的步不动 → 反查连续、不跳变
+  seq._scheduleStep(3, 10.375);            // 仍按 120 BPM 排
+  seq.setTempo(240);
+  seq._scheduleStep(4, 10.4375);           // 240 BPM：步长 62.5 ms
+  seq._scheduleStep(5, 10.5000);
+  check('setTempo 传到音频引擎', fa.tempo === 240, '音频侧 tempo = ' + fa.tempo);
+  check('变速后反查仍落在正确步', seq.stepAtTime(10.4374) === 3 &&
+        seq.stepAtTime(10.4375) === 4 && seq.stepAtTime(10.4999) === 4 &&
+        seq.stepAtTime(10.5000) === 5,
+        [10.4374, 10.4375, 10.4999, 10.5000].map(function (t) {
+          return seq.stepAtTime(t);
+        }).join(','));
+
+  // 顺序性：时间轴上的步号必须单调不回退
+  var mono = true, last = -1, prevT = 10.0;
+  for (var tt = 10.0; tt < 10.6; tt += 0.0005) {
+    var s2 = seq.stepAtTime(tt);
+    if (s2 !== null) { if (s2 !== last && (last + 1) % 16 !== s2 % 16) mono = false; last = s2; }
+  }
+  check('步号随时间严格递增不回退', mono, '末值 ' + last);
+
+  // ── 5.55 回环区间（入点 / 出点）────────────────────────
+  var fl = fakeAudio(0);
+  var sq = new TM.Sequencer(fl, new TM.Grid());
+
+  check('回环缺省是整圈', sq.loopIn === 0 && sq.loopOut === 15,
+        sq.loopIn + '..' + sq.loopOut);
+  check('整圈时 loopSpan = 列数', sq.loopSpan() === 16, '给出 ' + sq.loopSpan());
+
+  sq.setLoop(2, 6);
+  check('setLoop 生效', sq.loopIn === 2 && sq.loopOut === 6,
+        sq.loopIn + '..' + sq.loopOut);
+  check('跨度含两端', sq.loopSpan() === 5, '给出 ' + sq.loopSpan());
+
+  sq.setLoop(6, 2);
+  check('顺序反了自动交换', sq.loopIn === 2 && sq.loopOut === 6,
+        sq.loopIn + '..' + sq.loopOut);
+
+  sq.setLoop(-5, 99);
+  check('两端夹到 [0, cols-1]', sq.loopIn === 0 && sq.loopOut === 15,
+        sq.loopIn + '..' + sq.loopOut);
+
+  // 走到出点之后回到入点：0..2 应给出 0,1,2,0,1,2,0
+  sq.setLoop(0, 2);
+  sq.currentStep = 0;
+  var seen = [];
+  for (var li = 0; li < 7; li++) {
+    seen.push(sq.currentStep);
+    sq.currentStep += 1;
+    if (sq.currentStep > sq.loopOut) sq.currentStep = sq.loopIn;
+  }
+  check('走过出点回到入点', seen.join(',') === '0,1,2,0,1,2,0', seen.join(','));
+
+  // 区间不从 0 起：3..5 应给出 3,4,5,3
+  sq.setLoop(3, 5);
+  sq.currentStep = 3;
+  var seen2 = [];
+  for (var lj = 0; lj < 4; lj++) {
+    seen2.push(sq.currentStep);
+    sq.currentStep += 1;
+    if (sq.currentStep > sq.loopOut) sq.currentStep = sq.loopIn;
+  }
+  check('非零起点的区间也能正确回绕', seen2.join(',') === '3,4,5,3', seen2.join(','));
+
+  // 当前步在区间外时拉回入点
+  sq.currentStep = 12;
+  sq.setLoop(3, 5);
+  check('当前步在区间外时拉回入点', sq.currentStep === 3, '给出 ' + sq.currentStep);
+
+  // 只改一端：越过另一端时把它一起推走，而不是静默夹住
+  sq.setLoop(3, 5);
+  sq.setLoopIn(9);
+  check('入点越过出点时把出点一起推走',
+        sq.loopIn === 9 && sq.loopOut === 9, sq.loopIn + '..' + sq.loopOut);
+  sq.setLoop(3, 5);
+  sq.setLoopOut(1);
+  check('出点越过入点时把入点一起带回',
+        sq.loopIn === 1 && sq.loopOut === 1, sq.loopIn + '..' + sq.loopOut);
+
+  // seek 只夹到棋盘范围，不再按回环取模（允许停到区间外探索图案）
+  sq.seek(99);
+  check('seek 夹到最后一列', sq.currentStep === 15, '给出 ' + sq.currentStep);
+  sq.seek(-3);
+  check('seek 负数夹到 0', sq.currentStep === 0, '给出 ' + sq.currentStep);
+
+  // 真正跑排程：只允许排出区间内的列
+  var fl2 = fakeAudio(0);
+  var sq2 = new TM.Sequencer(fl2, new TM.Grid());
+  sq2.setLoop(4, 6);
+  sq2.playing = true;
+  fl2.ctx.currentTime = 10;                 // 把排程窗口推到远端，一次排很多步
+  var scheduled = [];
+  sq2._scheduleStep = function (step) { scheduled.push(step); };
+  sq2._tick();
+  check('排程只落在回环区间内',
+        scheduled.length > 20 && scheduled.every(function (c) { return c >= 4 && c <= 6; }),
+        '排了 ' + scheduled.length + ' 步，首 ' + scheduled[0] +
+        '，末 ' + scheduled[scheduled.length - 1]);
+  sq2.playing = false;
+
+  // 游标停在区间外时，排程前先拉回入点（否则会漏排一个区间外的音）
+  var sq3 = new TM.Sequencer(fakeAudio(0), new TM.Grid());
+  sq3.setLoop(0, 2);
+  sq3.currentStep = 9;                      // 模拟拖游标拖到区间外
+  sq3.playing = true;
+  var first = [];
+  sq3._scheduleStep = function (step) { first.push(step); };
+  sq3._tick();
+  check('游标在区间外时从入点开始排', first[0] === 0, '首步 ' + first[0]);
+  sq3.playing = false;
+
+  // ── 5.54 听觉时钟：视觉播放头由它反查 ─────────────────
+  // 「游标压到哪个格子时听到哪个音」完全由这里决定，所以选时钟的规则要锁死。
+  var fa2 = fakeAudio(0.05);               // 小于半步（0.0625）→ 全额补偿
+  var seq2 = new TM.Sequencer(fa2, new TM.Grid());
+  seq2.playing = true;
+  seq2._scheduleStep(0, 10.000);
+  seq2._scheduleStep(1, 10.125);
+  fa2.ctx.currentTime = 10.150;            // 写入头 10.15，听到 10.10 → 第 0 步
+  check('audibleStep 减去输出延迟（听到 10.10 → 第 0 步）',
+        seq2.audibleStep() === 0, '给出 ' + seq2.audibleStep());
+  fa2.ctx.currentTime = 10.200;            // 听到 10.15 → 第 1 步
+  check('延迟补偿跨步正确', seq2.audibleStep() === 1, '给出 ' + seq2.audibleStep());
+  seq2.playing = false;
+  check('停止时 audibleStep 返回 null', seq2.audibleStep() === null);
+
+  // 蓝牙耳机常把 outputLatency 报到一整步以上。补偿满额会让游标整整滞后一格
+  // （= 游标还停在前一格，声音已经响了），所以上限夹到半个步长。
+  var faBig = fakeAudio(0.25);
+  var seqBig = new TM.Sequencer(faBig, new TM.Grid());
+  faBig.ctx.currentTime = 10.0;
+  check('过大的延迟补偿被夹到半个步长',
+        Math.abs(seqBig.audibleTime() - (10.0 - seqBig.stepDuration() / 2)) < 1e-9,
+        '补偿 ' + (10.0 - seqBig.audibleTime()).toFixed(4) + 's / 半步 ' +
+        (seqBig.stepDuration() / 2).toFixed(4) + 's');
+
+  // 浏览器能给出「正在出声」的时钟时优先用它 —— 硬件缓冲与设备延迟已经在里面
+  var faTs = fakeAudio(0.25);
+  faTs.ctx.getOutputTimestamp = function () {
+    return { contextTime: 9.9, performanceTime: 0 };
+  };
+  var seqTs = new TM.Sequencer(faTs, new TM.Grid());
+  faTs.ctx.currentTime = 10.0;
+  check('优先采用 getOutputTimestamp（不再自己减延迟）',
+        Math.abs(seqTs.audibleTime() - 9.9) < 1e-9, seqTs.audibleTime().toFixed(4));
+
+  // 没有输出设备时它可能返回 0 / 停更，不能当成「一直播在第 0 秒」
+  faTs.ctx.getOutputTimestamp = function () {
+    return { contextTime: 0, performanceTime: 0 };
+  };
+  check('contextTime 无效时回落到补偿计算',
+        Math.abs(seqTs.audibleTime() - (10.0 - 0.0625)) < 1e-9,
+        seqTs.audibleTime().toFixed(4));
+
+  // ── 5.55 暂停 / 继续：继续必须接着播，不能回到第 0 步 ────
+  // 曾经 start() 里写死了 currentStep = 0，于是每次按空格继续都从头重放。
+  // currentStep 的语义是「下一个待排的步」：构造函数里是 0（首次播放自然从头），
+  // stop() 只停计时器不动它，start() 接着往下排就是继续。
+  var fres = fakeAudio(0);
+  var sres = new TM.Sequencer(fres, new TM.Grid());
+  sres.playing = true;                      // 装作已经在播
+  sres._scheduleStep(5, 9.0);               // 已经排出去过第 5、6 步
+  sres._scheduleStep(6, 9.125);
+  sres.currentStep = 7;                     // 推进 currentStep 的是 _tick，这里直接摆好
+  check('currentStep 停在「下一个待排的步」上', sres.currentStep === 7, sres.currentStep + '');
+
+  sres.stop();
+  check('stop() 只停不重置 currentStep',
+        sres.playing === false && sres.currentStep === 7, sres.currentStep + '');
+
+  sres.start();
+  check('继续后接着排第 7 步（不是第 0 步）',
+        sres.playing === true && sres.timeline.length === 1 &&
+        sres.timeline[0].step === 7,
+        '首排步号 ' + (sres.timeline.length ? sres.timeline[0].step : '—'));
+  check('继续后 currentStep 前进到 8', sres.currentStep === 8, sres.currentStep + '');
+
+  // ── 5.56 seek：鼠标拖标尺时用的跳转 ────────────────────
+  // 语义：只改「下一个待排的步」，**不重建已经排进音频时钟的音符**。
+  var fsk = fakeAudio(0);
+  var ssk = new TM.Sequencer(fsk, new TM.Grid());
+  ssk.playing = true;
+  ssk._scheduleStep(2, 5.0);                  // 先往时间轴里塞点**旧记录**
+  ssk.playing = false;
+  check('seek 前时间轴里确实有旧记录', ssk.timeline.length === 1,
+        ssk.timeline.length + ' 条');
+
+  ssk.seek(12);
+  check('暂停时 seek 只改步号、不开始播放',
+        ssk.currentStep === 12 && ssk.playing === false, ssk.currentStep + '');
+  // 这条必须建立在「清之前确实非空」上，否则撤掉实现也测不出来
+  check('seek 会清掉旧时间轴（反查记录已不对应新位置）', ssk.timeline.length === 0,
+        ssk.timeline.length + ' 条');
+  ssk.seek(-3);
+  check('seek 对负数夹到 0（不再取模）', ssk.currentStep === 0, ssk.currentStep + '');
+
+  ssk.playing = true;
+  ssk.seek(4);
+  check('播放中 seek 立刻按新位置补排一步',
+        ssk.timeline.length === 1 && ssk.timeline[0].step === 4,
+        '首排步号 ' + (ssk.timeline.length ? ssk.timeline[0].step : '—'));
+  check('播放中 seek 后步号继续前进', ssk.currentStep === 5, ssk.currentStep + '');
+  ssk.stop();
+
+  // 首次播放仍应从第 0 步开始（别为了修「继续」把「首次」搞坏）
+  var fnew = fakeAudio(0);
+  var snew = new TM.Sequencer(fnew, new TM.Grid());
+  snew.start();
+  check('全新音序器首次播放从第 0 步开始',
+        snew.timeline.length === 1 && snew.timeline[0].step === 0,
+        '首排步号 ' + (snew.timeline.length ? snew.timeline[0].step : '—'));
+  snew.stop();
+
+  // ── 5.6 没有延迟：干声直出 ─────────────────────────────
+  // 曾经串着一条 3 步反馈延迟（干 1.0 / 湿 0.06 / 反馈 0.4）。它让每个音后面
+  // 跟着一个 375 ms 的重影，稀疏图案里还会冒出不属于图案的鬼音，已整条删除。
+  var eng0 = new TM.AudioEngine();
+  var oc0 = new OfflineAudioContext(2, 4410, 44100);
+  eng0.buildGraph(oc0);
+  check('音频图里没有延迟节点', eng0.delay === undefined &&
+        eng0.delayWet === undefined && eng0.delayFeedback === undefined);
+  check('AudioEngine 不再提供 delaySecondsFor', typeof eng0.delaySecondsFor === 'undefined');
+  check('CONFIG 里不再残留 DELAY_* 常量',
+        CFG.DELAY_BARS === undefined && CFG.DELAY_FEEDBACK === undefined &&
+        CFG.DELAY_WET === undefined && CFG.DELAY_MOD_SAMPLES === undefined);
+
+  // ── 5.7 工程状态的编解码与存档（storage.js）─────────────
+  // MM3 = JSON（音符 + 入点/出点 + BPM + 音量）→ LZW → base64url。
+  // 音符按**音高**存（不是行号），于是换面板 / 加减八度 / 换音阶都还能用。
+  var S = TM.Store;
+  var N16 = CFG.NOTES;                                     // 本页 16 行的音高表
+  var N48 = TM.buildScaleTable(48, CFG.NOTES[0] + 12, TM.SCALES.chromatic);
+
+  var code0 = S.encode(new TM.Grid(), N16);
+  check('空谱子也能编码', /^MM3\.[A-Za-z0-9\-_]+$/.test(code0),
+        code0 + '（' + code0.length + ' 字符）');
+  check('代码是 URL 安全的（不含 + / =）', !/[+/=]/.test(code0));
+
+  var ga = new TM.Grid();
+  ga.set(0, 0, true);        // 行 0 → 音高 96
+  ga.set(15, 15, true);      // 行 15 → 音高 60
+  ga.set(7, 3, true);        // 行 3 → 音高 89
+  var codeA = S.encode(ga, N16);
+  var dA = S.decode(codeA);
+  check('MM3 解码成功', dA.ok && dA.version === 3, dA.error || '');
+  check('MM3 记的是音高而不是行号', dA.ok && (function () {
+    var got = dA.notes.slice().sort(function (x, y) {
+      return x.col - y.col || x.note - y.note;
+    });
+    return got.length === 3 &&
+           got[0].col === 0 && got[0].note === 96 &&
+           got[1].col === 7 && got[1].note === 89 &&
+           got[2].col === 15 && got[2].note === 60;
+  })(), dA.ok ? JSON.stringify(dA.notes) : '');
+
+  // ── 跨尺寸：这一轮要解决的核心问题 ──────────────────────
+  var back16 = new TM.Grid();
+  var r16 = S.applyCode(back16, codeA, N16);
+  check('同面板往返：逐位一致',
+        r16.ok && r16.placed === 3 && r16.dropped === 0 && r16.snapped === 0 &&
+        back16.get(0, 0) && back16.get(15, 15) && back16.get(7, 3) &&
+        back16.count() === 3);
+
+  // 同一段代码载进「64×48 半音阶」面板：音高按音高落位，行号自然跟着变。
+  // 只有 16×16 最低的 A3(60) 会就近对齐 —— 48 行表底部是 A#3(61)，差一个半音。
+  var big48 = new TM.Grid({ cols: 64, rows: 48 });
+  var r48 = S.applyCode(big48, codeA, N48);
+  check('16×16 的代码能直接载进 64×48 面板（音高不变，只有 A3 差半音需对齐）',
+        r48.ok && r48.placed === 3 && r48.dropped === 0 && r48.snapped === 1,
+        r48.ok ? (r48.placed + ' 个音符 / 对齐 ' + r48.snapped) : r48.error);
+  check('落位在正确的**新行号**上（行号变了，音高没变）',
+        big48.get(0, N48.indexOf(96)) && big48.get(7, N48.indexOf(89)) &&
+        big48.get(15, N48.indexOf(61)),
+        '音高 96：16 行表里第 ' + N16.indexOf(96) + ' 行 → 48 行表里第 ' +
+        N48.indexOf(96) + ' 行；音高 60 不在 48 行表里，对齐到 61（第 ' +
+        N48.indexOf(61) + ' 行）');
+
+  // 反向 + 换音阶：48 行半音阶里有些音高不在 16 行五声表里，要就近对齐
+  var src48 = new TM.Grid({ cols: 64, rows: 48 });
+  src48.set(0, 12, true);    // 行 12 → 音高 96，16×16 里正好有
+  src48.set(1, 13, true);    // 行 13 → 音高 95，16×16 里没有 → 就近取整到 96
+  var narrow16 = new TM.Grid();
+  var rNear = S.applyCode(narrow16, S.encode(src48, N48), N16);
+  check('跨音阶载入：表内音高精确落位、表外就近对齐',
+        rNear.ok && rNear.placed === 2 && rNear.snapped === 1 && rNear.dropped === 0,
+        'placed ' + rNear.placed + ' / snapped ' + rNear.snapped +
+        ' / dropped ' + rNear.dropped);
+
+  // 列超出目标宽度要丢弃，不能折行或静默错位
+  var wide = new TM.Grid({ cols: 64, rows: 48 });
+  wide.set(40, 20, true);
+  var rDrop = S.applyCode(new TM.Grid(), S.encode(wide, N48), N16);
+  check('列号超出目标宽度时丢弃（不折行、不静默错位）',
+        rDrop.ok && rDrop.dropped === 1 && rDrop.placed === 0,
+        'placed ' + rDrop.placed + ' / dropped ' + rDrop.dropped);
+
+  // 稀疏压缩的收益：典型谱子只点亮很少的格子，不必把整张画布都编进去
+  var gFull = new TM.Grid();
+  gFull.replaceAll(new Uint8Array(256).fill(1));
+  var gOne = new TM.Grid();
+  gOne.set(0, 0, true);
+  var one = S.encode(gOne, N16);
+  var fullCode = S.encode(gFull, N16);
+  // MM3 比 MM2 长是**明知代价**：它多带了四个参数，而且是 JSON + 通用压缩。
+  // 实测：空谱 64（MM2 10）、单音 74（12）、满格 480（108）。
+  check('单音符的代码长度在预期内（MM2 是 12，MM3 因带参数而更长）',
+        one.length >= 60 && one.length < 90, one.length + ' 字符');
+  check('满格谱子的代码仍然远短于 URL 上限',
+        fullCode.length < 520, fullCode.length + ' 字符');
+  check('空谱的代码只比 MM2 多一个固定头（参数本身要占位）',
+        S.encode(new TM.Grid(), N16).length < 80,
+        S.encode(new TM.Grid(), N16).length + ' 字符');
+  check('满格谱子往返后仍是满格', (function () {
+    var g = new TM.Grid();
+    return S.applyCode(g, S.encode(gFull, N16), N16).ok && g.count() === 256;
+  })());
+
+  // ── 工程状态：代码要带走的不只是音符 ───────────────────
+  var gp = new TM.Grid();
+  gp.set(2, 3, true);
+  var codeP = S.encode(gp, N16, { bpm: 97, vol: 41, loopIn: 2, loopOut: 7 });
+  var dP = S.decode(codeP);
+  check('代码里带上了速度 / 音量 / 回环区间',
+        dP.ok && dP.params &&
+        dP.params.bpm === 97 && dP.params.vol === 41 &&
+        dP.params.loopIn === 2 && dP.params.loopOut === 7,
+        dP.ok ? JSON.stringify(dP.params) : dP.error);
+  check('参数不影响音符的落位',
+        dP.ok && dP.notes.length === 1 && dP.notes[0].col === 2 && dP.notes[0].note === 89);
+
+  // 不给参数时用面板默认值，且**仍然显式写进代码**（不是省略）
+  var dDef = S.decode(S.encode(gp, N16));
+  check('缺省参数写成面板默认值', dDef.ok && dDef.params &&
+        dDef.params.bpm === CFG.TEMPO && dDef.params.vol === CFG.VOLUME &&
+        dDef.params.loopIn === 0 && dDef.params.loopOut === 15,
+        JSON.stringify(dDef.params));
+
+  // 越界要夹住，不能把 -3 / 999 原样塞回去
+  var dClamp = S.decode(S.encode(gp, N16, { bpm: 5, vol: 999, loopIn: -4, loopOut: 99 }));
+  check('参数越界时被夹到合法范围', dClamp.ok &&
+        dClamp.params.bpm === 20 && dClamp.params.vol === 100 &&
+        dClamp.params.loopIn === 0 && dClamp.params.loopOut === 15,
+        JSON.stringify(dClamp.params));
+
+  check('applyCode 会把参数原样交给调用方（由 UI 决定怎么套用）',
+        (function () {
+          var r = S.applyCode(new TM.Grid(), codeP, N16);
+          return r.ok && r.params && r.params.bpm === 97 && r.params.loopOut === 7;
+        })());
+
+  // ── 向后兼容：MM2（只有音符）与 MM1 仍要能读 ───────────
+  // 这段 MM2 是上一版编码器产出的：col 0/7/15，音高 96/89/60。
+  var MM2_SAMPLE = 'MM2.ATwkEAEBJAcBHQgBAA';
+  var dM2 = S.decode(MM2_SAMPLE);
+  check('仍能解旧格式 MM2（按音高的稀疏坐标）',
+        dM2.ok && dM2.version === 2 && dM2.notes.length === 3 &&
+        dM2.notes[0].note === 96 && dM2.notes[1].note === 89 && dM2.notes[2].note === 60,
+        dM2.ok ? JSON.stringify(dM2.notes) : dM2.error);
+  check('MM2 没有参数，解出来是 undefined（不覆盖用户当前设置）',
+        dM2.ok && dM2.params === undefined);
+  check('MM2 载入后的落位与 MM3 一致', (function () {
+    var g = new TM.Grid();
+    var r = S.applyCode(g, MM2_SAMPLE, N16);
+    return r.ok && r.placed === 3 && g.get(0, 0) && g.get(7, 3) && g.get(15, 15);
+  })());
+
+  // ── 向后兼容：仍然认得旧格式 MM1 ───────────────────────
+  function cm1Code(setter) {
+    var g = new TM.Grid();
+    setter(g);
+    var b = new Uint8Array(32);
+    for (var i = 0; i < 256; i++) if (g.cells[i]) b[i >> 3] |= (1 << (i & 7));
+    var s = '';
+    for (i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return 'MM1.16x16.' + btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  var oldCode = cm1Code(function (g) { g.set(0, 0, true); g.set(5, 9, true); });
+  var gOld = new TM.Grid();
+  var rOld = S.applyCode(gOld, oldCode, N16);
+  check('仍能载入旧格式 MM1（同尺寸）',
+        rOld.ok && rOld.legacy === true && rOld.placed === 2 &&
+        gOld.get(0, 0) && gOld.get(5, 9));
+  check('MM1 载到大面板时明确拒绝并说明原因（行号对应关系已重建不出来）',
+        (function () {
+          var r = S.applyCode(new TM.Grid({ cols: 64, rows: 48 }), oldCode, N48);
+          return r.ok === false && /MM1/.test(r.error);
+        })());
+
+  // ── 坏输入 ─────────────────────────────────────────────
+  check('拒绝乱码', S.decode('hello world').ok === false);
+  check('拒绝未知版本前缀', S.decode('CM9.xxx').ok === false);
+  check('拒绝坏的 base64 正文', S.decode('MM2.!!!').ok === false);
+  check('拒绝坏的 MM3 正文', S.decode('MM3.!!!').ok === false);
+  check('MM3 正文被换掉一个字符就会解不出来（没有静默容错）', (function () {
+    var good = S.encode(gp, N16);
+    var bad = good.slice(0, 20) + (good.charAt(20) === 'A' ? 'B' : 'A') + good.slice(21);
+    return bad !== good && S.decode(bad).ok === false;
+  })());
+  check('拒绝被截断的正文（长度对不上就报错，不静默少读几个音）',
+        (function () {
+          var good = S.encode(gFull, N16);
+          return S.decode(good.slice(0, good.length - 4)).ok === false;
+        })());
+
+  // ── 落位只发一次事件 ───────────────────────────────────
+  var gEv = new TM.Grid();
+  var emits = 0;
+  gEv.onChange(function () { emits++; });
+  check('applyCode 成功', S.applyCode(gEv, codeA, N16).ok === true);
+  check('applyCode 只发一次变更事件（不是逐格 emit）', emits === 1, '发了 ' + emits + ' 次');
+  check('replaceAll 长度不符时返回 false 且不改动',
+        gEv.replaceAll(new Uint8Array(3)) === false && gEv.count() === 3);
+
+  // ── localStorage（无头 Chrome 下若被禁用，这几条会自动跳过）──
+  var lsOK = S.available();
+  if (lsOK) {
+    check('存储键按面板身份、**不含尺寸**（加减八度后存档还能接着用）',
+          S.storageKey() === 'matrixmusic.score.small' &&
+          S.panelId() === 'small', S.storageKey());
+    check('保留旧尺寸键的兜底入口',
+          S.legacyKey(16, 16) === 'matrixmusic.pattern.16x16', S.legacyKey(64, 48));
+
+    var gs5 = new TM.Grid();
+    gs5.set(2, 2, true); gs5.set(9, 14, true);
+    check('save 写进 localStorage', S.save(gs5, N16) === true);
+    var raw = S.load(gs5);
+    check('load 取回的正是同一段代码', raw === S.encode(gs5, N16));
+    var gs6 = new TM.Grid();
+    check('从存档还原出同样的谱子',
+          S.applyCode(gs6, raw, N16).ok && gs6.count() === 2 &&
+          gs6.get(2, 2) && gs6.get(9, 14));
+
+    // 一次性迁移：新键读不到时退回旧尺寸键
+    localStorage.removeItem('matrixmusic.score.small');
+    localStorage.setItem('matrixmusic.pattern.16x16', oldCode);
+    check('新键读不到时退回旧尺寸键（旧存档因此不会丢）',
+          S.load(gs5) === oldCode, String(S.load(gs5)).slice(0, 24) + '…');
+
+    S.remove();
+    localStorage.removeItem('matrixmusic.pattern.16x16');
+    check('remove 清掉存档', S.load(gs5) === null);
+  } else {
+    info('跳过 localStorage 相关断言（当前环境不可用）');
+  }
+
+  // ── 6. 离线音频渲染 ────────────────────────────────────
+  // 只渲染一次：60 BPM 下延迟 = 3 步 = 750 ms，回声与干声在时间上完全分开，
+  // 便于同时验证波形/包络/声像与「延迟跟随速度」。
+  var realRandom = Math.random;
+  Math.random = function () { return 0.5; };     // r = 0 → gainL = gainR = 1
+
+  var offline = new OfflineAudioContext(2, 44100 * 1.2, 44100);
+  var eng = new TM.AudioEngine();
+  eng.setTempo(60);                              // 必须在建图前设置：
+  eng.buildGraph(offline);                       // 延迟初值直接取 750 ms，避免过渡期拖尾糊掉测量
+  eng.setVolume(1);
+  eng.synthNote(72, 0);                          // A4 = 440 Hz
+
+  offline.startRendering().then(function (buf) {
+    Math.random = realRandom;
+
+    var L = buf.getChannelData(0);
+    var R = buf.getChannelData(1);
+    function peakBetween(a, b) {
+      var p = 0, i0 = Math.floor(a * 44100), i1 = Math.min(L.length, Math.floor(b * 44100));
+      for (var i = i0; i < i1; i++) p = Math.max(p, Math.abs(L[i]));
+      return p;
+    }
+
+    // 峰值应等于包络峰值 0.16（软限幅在 0.7 以下为线性，不改变幅值）
+    var peak = 0;
+    for (var i2 = 0; i2 < L.length; i2++) peak = Math.max(peak, Math.abs(L[i2]));
+    check('峰值 = 0.16（包络 env² 峰值）', near(peak, 0.16, 0.005), peak.toFixed(5));
+
+    // 零交叉估算频率
+    var crossings = 0, prev = L[44];               // 跳过最开头的几个采样
+    var winEnd = Math.floor(44100 * 0.3);
+    for (var j = 44; j < winEnd; j++) {
+      var cur = L[j];
+      if ((prev < 0 && cur >= 0) || (prev >= 0 && cur < 0)) crossings++;
+      prev = cur;
+    }
+    var freq = crossings / 2 / 0.3;
+    check('频率 ≈ 440 Hz（A4）', near(freq, 440, 8), freq.toFixed(1) + ' Hz');
+
+    // 包络在 t = 0.25 s 处的幅值应为 0.16 · 0.5² = 0.04
+    var s0 = Math.floor(44100 * 0.25), localPeak = 0;
+    for (var m = s0; m < s0 + 300; m++) localPeak = Math.max(localPeak, Math.abs(L[m]));
+    check('t=0.25s 幅值 ≈ 0.04（二次衰减）', near(localPeak, 0.04, 0.012),
+          localPeak.toFixed(5));
+
+    // 立体声：随机声像居中时 L、R 应一致
+    var lrDiff = 0;
+    for (var q = 0; q < 2000; q++) lrDiff = Math.max(lrDiff, Math.abs(L[q] - R[q]));
+    check('r=0 时左右声道一致', lrDiff < 1e-6, lrDiff.toExponential(2));
+
+    // 干声直出：音符 0.5 s 收尾之后，整条轨上不该再有任何东西响。
+    // 这条断言直接锁住「没有回声」—— 加回任何形式的延迟/混响都会让它变红。
+    var after = peakBetween(0.55, 1.15);
+    check('0.55 s 之后完全安静（没有回声 / 延迟）', after < 0.001,
+          after.toFixed(6));
+    check('整段峰值就是干声峰值 0.16', near(peak, 0.16, 0.005), peak.toFixed(5));
+
+    finish();
+  }).catch(function (e) {
+    Math.random = realRandom;
+    check('离线渲染未抛异常', false, String(e && e.message || e));
+    finish();
+  });
+
+  function finish() { report(); }
+})();
+</script>
+</body>
+</html>

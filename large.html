@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Matrix Music · Large</title>
+<meta name="theme-color" content="#000000">
+<script>
+  /* 首屏防闪，同 index.html —— 在样式表生效前先定下主题 */
+  (function () {
+    var m = /[?&]theme=(dark|light)(?:&|$)/.exec(location.search);
+    var t = m && m[1];
+    if (!t) { try { t = localStorage.getItem('mm.theme'); } catch (e) {} }
+    if (t !== 'dark' && t !== 'light') {
+      t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)
+        ? 'light' : 'dark';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', t === 'light' ? '#ffffff' : '#000000');
+  })();
+</script>
+<link rel="stylesheet" href="style.css?v=202610241623">
+</head>
+<body class="wide">
+
+<main class="stage stage-wide">
+  <!-- 顶栏：标题、简介、操作、参数压成一条。棋盘因此能吃到屏幕剩下的全部高度 -->
+  <header class="topbar">
+    <div class="brand">
+      <h1>Matrix Music<span class="tag">Large</span></h1>
+      <p class="sub">48 音 · 横向无限 · 半音阶 A7→A#3</p>
+    </div>
+
+    <div class="bar-actions">
+      <button id="btn-toggle" class="btn primary">播放</button>
+      <button id="btn-clear" class="btn">清空</button>
+
+      <span class="ctl-sep" aria-hidden="true"></span>
+      <div class="presets" id="presets" role="group" aria-label="示例谱">
+        <span class="presets-label">示例</span>
+      </div>
+      <span class="ctl-sep" aria-hidden="true"></span>
+
+      <label class="field" for="tempo">
+        <span class="field-label">速度</span>
+        <input id="tempo" class="f-range" type="range" min="40" max="240" step="1" value="120">
+        <output id="tempo-out" class="field-value" for="tempo">120 BPM</output>
+      </label>
+
+      <label class="field" for="volume">
+        <span class="field-label">音量</span>
+        <input id="volume" class="f-range" type="range" min="0" max="100" step="1" value="85">
+        <output id="volume-out" class="field-value" for="volume">85%</output>
+      </label>
+
+      <span class="ctl-sep" aria-hidden="true"></span>
+      <button id="btn-share" class="btn" aria-expanded="false" aria-controls="share-row">谱子</button>
+      <button id="btn-help" class="btn icon" aria-expanded="false" aria-controls="help-pop"
+              aria-label="快捷键与手势" title="快捷键与手势">?</button>
+      <!-- 回基准版的入口。改版时页脚被整段撤掉，这个链接差点跟着一起消失 -->
+      <a class="bar-link" id="link-small" href="index.html"
+         title="回到 16 × 16 基准版">16×16</a>
+    </div>
+
+    <!-- 谱子：**浮层**，弹出时不挤动棋盘（以前是往下挤出一行） -->
+    <div class="ctl-row ctl-share pop" id="share-row" hidden>
+      <textarea id="share-code" class="share-code" rows="3" spellcheck="false"
+                autocomplete="off" aria-label="乐谱代码"></textarea>
+      <div class="share-acts">
+        <button id="btn-share-copy" class="btn">复制</button>
+        <button id="btn-share-load" class="btn">载入</button>
+      </div>
+      <p id="share-status" class="share-status" role="status"></p>
+    </div>
+
+    <!-- 帮助：快捷键与手势。原来是一大段页脚，现在收进一个浮层 -->
+    <div class="pop pop-help" id="help-pop" hidden>
+      <div class="pop-col">
+        <h2 class="pop-title">键盘</h2>
+        <ul class="keys">
+          <li><kbd>空格</kbd><span>播放 / 暂停</span></li>
+          <li><kbd>⌘Z</kbd><span>撤销（⌘⇧Z 重做）</span></li>
+          <li><kbd>I</kbd><kbd>O</kbd><span>在游标处设入点 / 出点</span></li>
+          <li><kbd>A</kbd><kbd>X</kbd><span>填满 / 清空选区</span></li>
+          <li><kbd>Esc</kbd><span>取消选区</span></li>
+        </ul>
+      </div>
+      <div class="pop-col">
+        <h2 class="pop-title">鼠标与手势</h2>
+        <ul class="keys">
+          <li><kbd>左键</kbd><span>点 / 拖动开关方格</span></li>
+          <li><kbd>右键</kbd><span>试听这一格</span></li>
+          <li><kbd>Alt</kbd><span>+ 拖动框选，选中后拖动可搬走</span></li>
+          <li><kbd>⇧</kbd><span>+ 滚轮 或 触控板横滑 / 中键拖动：横向平移</span></li>
+          <li><kbd>边缘</kbd><span>画到画布边缘会自动继续平移</span></li>
+        </ul>
+      </div>
+    </div>
+  </header>
+
+  <!-- 棋盘：吃掉顶栏以下的所有高度。纵向仍然在框内滚（48 行 × 32px = 1536px） -->
+  <div class="board-shell">
+    <div class="board-frame">
+      <div class="board-box">
+        <div class="ruler" id="ruler" role="slider" tabindex="0"
+             aria-label="播放位置" aria-valuemin="0" aria-valuemax="63" aria-valuenow="0"
+             title="点或拖动这里移动播放游标">
+          <div class="ruler-band" id="ruler-band"></div>
+          <div class="ruler-dim ruler-dim-l" id="ruler-dim-l"></div>
+          <div class="ruler-dim ruler-dim-r" id="ruler-dim-r"></div>
+          <div class="ruler-edge ruler-edge-in" id="ruler-in" title="入点（I）" role="slider" tabindex="0" aria-label="回环入点"></div>
+          <div class="ruler-edge ruler-edge-out" id="ruler-out-edge" title="出点（O）" role="slider" tabindex="0" aria-label="回环出点"></div>
+          <div class="ruler-cursor" id="ruler-cursor"></div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="matrix" width="2048" height="1536" aria-label="48 音 × 横向无限 音符矩阵"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!--
+  加载顺序与 index.html 一致，只在 constants 之后多插了一个 large-config：
+  它在构造任何对象**之前**把 TM.RUNTIME 覆盖成 32 × 64，之后的模块一律从
+  RUNTIME 读维度，因此不需要为大盘面单独维护一份引擎。
+-->
+<script src="src/constants.js?v=202610241623"></script>
+<script src="src/large-config.js?v=202610241623"></script>
+<script src="src/theme.js?v=202610241623"></script>
+<script src="src/grid.js?v=202610241623"></script>
+<script src="src/audio.js?v=202610241623"></script>
+<script src="src/sequencer.js?v=202610241623"></script>
+<script src="src/renderer.js?v=202610241623"></script>
+<script src="src/storage.js?v=202610241623"></script>
+<script src="src/presets.js?v=202610241623"></script>
+<script src="src/app.js?v=202610241623"></script>
+</body>
+</html>

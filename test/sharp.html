@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>sharp</title></head>
+<body><pre id="out">…</pre>
+<canvas id="c" width="16" height="16"></canvas>
+<script src="../src/constants.js"></script>
+<script src="../src/grid.js"></script>
+<script src="../src/renderer.js"></script>
+<script>
+var TM = window.TM, lines = [];
+
+function probe(note) {
+  var g = new TM.Grid();
+  var host = document.getElementById('c');
+  var r = new TM.Renderer(host, g);
+  var S = r.scale;
+  var D = r.devSize || Math.round(32 * 16 * S);   // 兼容改造前的版本
+  g.set(4, 4, true);                       // 单个激活格
+
+  // 直接读格子图层（未叠加微光），隔离出纯几何边缘
+  var pc = r.patternLayer.getContext('2d');
+  var d = pc.getImageData(0, 0, D, D).data;
+  var lum = function (x, y) { return d[(y * D + x) * 4]; };
+
+  var cx = Math.round((4 * 32 + 16) * S);
+  var cy = Math.round((4 * 32 + 16) * S);
+
+  // 只取「间隙 → 方块」的上升沿：从 cx-16*S 扫到 cx
+  var prof = [];
+  for (var dx = -16 * S; dx <= 0; dx++) prof.push(lum(cx + dx, cy));
+
+  var lo = Math.min.apply(null, prof), hi = Math.max.apply(null, prof);
+  var lo10 = lo + (hi - lo) * 0.1, hi10 = lo + (hi - lo) * 0.9;
+  var t = [];
+  for (var i = 0; i < prof.length; i++) if (prof[i] > lo10 && prof[i] < hi10) t.push(i);
+  var w = t.length ? (t[t.length - 1] - t[0] + 1) : 0;
+
+  lines.push(note + '  scale=' + S + '  devSize=' + D);
+  lines.push('  方块内亮=' + hi + '  间隙最暗=' + lo +
+             '  间隙→方块 10%-90% 过渡 = ' + w + ' 设备像素 (' + (w / S).toFixed(2) + ' 逻辑像素)');
+  lines.push('  上升沿剖面: ' + prof.join(' '));
+}
+
+probe('单格边缘剖面');
+document.getElementById('out').textContent = lines.join('\n');
+document.title = 'DONE';
+</script>
+</body></html>

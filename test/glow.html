@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>glow</title></head>
+<body><pre id="out">…</pre>
+<canvas id="c" width="16" height="16"></canvas>
+<script src="../src/constants.js"></script>
+<script src="../src/grid.js"></script>
+<script src="../src/renderer.js"></script>
+<script>
+/*
+ * 微光亮度场的 ASCII 可视化（调试用，不进回归）。
+ *
+ * 每个字符是 glow[行][列] 的 0..9 分档：'.' = 全黑，'9' = 满亮。
+ * 想确认「没有扩散」时看它最快 —— 涟漪时代这里会出现一圈圈同心数字。
+ */
+var TM = window.TM;
+var lines = [];
+
+function dump(r, title) {
+  lines.push('--- ' + title + ' ---');
+  for (var y = 0; y < 16; y++) {
+    var row = '';
+    for (var x = 0; x < 16; x++) {
+      var a = Math.min(9, Math.round(r.glow[y][x] * 10));
+      row += (a === 0 ? '.' : a);
+    }
+    lines.push(row);
+  }
+  lines.push('');
+}
+
+// A. 只点亮一帧：光应该停在原地，四邻全空
+var g1 = new TM.Grid();
+var r1 = new TM.Renderer(document.getElementById('c'), g1);
+g1.set(4, 8, true);
+r1.glow[8][4] = 0;                     // 清掉点格子时的即时点亮
+r1.stepGlow(4);
+dump(r1, 'A. 点亮第 4 列的第 8 行（1 帧）—— 只有一格，没有扩散');
+
+// B. 同一列持续 8 帧（120 BPM @ 60fps 的一个步长）：保持满亮
+for (var i = 0; i < 7; i++) r1.stepGlow(4);
+dump(r1, 'B. 同一列持续 8 帧 —— 维持满亮，不会越积越高');
+
+// C. 换到下一列：旧的开始暗，新的亮起
+r1.stepGlow(5);
+dump(r1, 'C. 换到第 5 列 —— 旧列衰减、新列亮起，互不影响');
+
+// D. 暂停（seed = false）30 帧：全部熄灭
+for (var j = 0; j < 30; j++) r1.stepGlow(5, false);
+dump(r1, 'D. 暂停 30 帧 —— 全部熄灭');
+
+// E. 空列不发光
+var g2 = new TM.Grid();
+var r2 = new TM.Renderer(document.getElementById('c'), g2);
+r2.stepGlow(3);
+dump(r2, 'E. 空谱子走过第 3 列 —— 不该有任何亮斑');
+
+document.getElementById('out').textContent = lines.join('\n');
+document.title = 'DONE';
+</script>
+</body></html>

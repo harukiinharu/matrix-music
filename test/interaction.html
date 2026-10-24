@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>interaction</title></head>
+<body>
+<pre id="out">running…</pre>
+<script>
+/* 乐谱现在会自动存进 localStorage，而本测试要求「初始网格为空」。
+   父页与 iframe 同为 file:// origin、共用同一份存储，所以在 iframe 开始加载**之前**
+   先清干净 —— 这段必须放在 <iframe> 标签前面。 */
+try { localStorage.removeItem('matrixmusic.score.small'); } catch (e) { /* 存储不可用则忽略 */ }
+try { localStorage.removeItem('matrixmusic.loop.small'); } catch (e) { /* 同上 */ }
+</script>
+<iframe id="app" src="../index.html?debug=1" width="880" height="1100" style="border:0"></iframe>
+<script>
+/*
+ * Matrix Music 页面级交互自检
+ *
+ * 断言全部建立在模型状态上（通过 index.html?debug=1 暴露的 __matrixMusicDebug），
+ * 不去采样渲染后的像素 —— 无头环境里 rAF 与定时器的推进节奏不一致，
+ * 像素采样必然不稳定。渲染管线单独用一次显式 composite() 验证。
+ */
+var lines = [], pass = 0, fail = 0, done = false;
+
+function check(name, ok, detail) {
+  (ok ? pass++ : fail++);
+  lines.push((ok ? 'PASS  ' : 'FAIL  ') + name + (detail ? '   ' + detail : ''));
+}
+function info(name, detail) { lines.push('INFO  ' + name + '   ' + detail); }
+
+function report() {
+  if (done) return;
+  done = true;
+  lines.unshift('Matrix Music 交互自检 —— ' + pass + ' 通过 / ' + fail + ' 失败');
+  lines.unshift('');
+  document.getElementById('out').textContent = lines.join('\n');
+  document.title = 'DONE ' + pass + '/' + (pass + fail);
+}
+
+function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+async function waitFor(fn, timeoutMs, label) {
+  var limit = timeoutMs || 2000, waited = 0;
+  while (waited < limit) {
+    try { if (fn()) return true; } catch (e) { /* 忽略 */ }
+    await wait(40);
+    waited += 40;
+  }
+  if (label) info('轮询超时', label);
+  return false;
+}
+
+window.addEventListener('error', function (e) {
+  lines.push('JS ERROR: ' + e.message); fail++; report();
+});
+window.addEventListener('unhandledrejection', function (e) {
+  lines.push('PROMISE REJECT: ' + (e.reason && e.reason.message || e.reason));
+  fail++; report();
+});
+setTimeout(function () { lines.push('WATCHDOG: 12s 未完成'); fail++; report(); }, 12000);
+
+var frame = document.getElementById('app');
+
+frame.addEventListener('load', function () {
+  var win = frame.contentWindow, doc = frame.contentDocument;
+  if (!doc) { check('能访问 iframe 文档', false, 'contentDocument 为空'); report(); return; }
+  win.addEventListener('error', function (e) {
+    lines.push('IFRAME ERROR: ' + e.message + ' @' + e.lineno);
+  });
+  run(win, doc).catch(function (e) {
+    check('交互自检未抛异常', false, String(e && e.message || e));
+    report();
+  });
+});
+
+async function run(win, doc) {
+  await waitFor(function () { return !!win.__matrixMusicDebug; }, 2000);
+
+  var dbg = win.__matrixMusicDebug;
+  check('debug 句柄可用（?debug=1）', !!dbg,
+        dbg ? 'grid/audio/sequencer/renderer 均暴露' : '未注入');
+  if (!dbg) { report(); return; }
+
+  // ── 文案 ───────────────────────────────────────────────
+  check('页面标题 = Matrix Music', doc.title === 'Matrix Music', '实际 ' + doc.title);
+  var h1 = doc.querySelector('.head h1');
+  check('主标题 = Matrix Music', h1 && h1.textContent.trim() === 'Matrix Music',
+        h1 ? h1.textContent.trim() : '缺失');
+  var sub = doc.querySelector('.head .sub');
+  check('副标题存在', !!sub && sub.textContent.trim().length > 0,
+        sub ? sub.textContent.trim() : '缺失');
+
+  // ── 明暗主题 ───────────────────────────────────────────
+  var root = doc.documentElement;
+  var theme0 = root.getAttribute('data-theme');
+  check('主题已解析并写在 <html data-theme>', theme0 === 'dark' || theme0 === 'light',
+        '实际 ' + theme0);
+
+  var bg0 = win.getComputedStyle(root).getPropertyValue('--bg').trim().toLowerCase();
+  check('CSS 变量 --bg 与渲染调色板一致',
+        bg0 === win.TM.CONFIG.COLORS.background.toLowerCase(),
+        bg0 + ' vs ' + win.TM.CONFIG.COLORS.background);
+
+  // 八度配色：每个八度一个颜色，且相邻八度必须不同
+  var pal = win.TM.CONFIG.COLORS.octaveOn;
+  check('存在八度配色表（octaveOn）', pal && pal.length === 11,
+        pal ? pal.length + ' 个八度' : '缺失');
+  check('相邻八度颜色不同', pal[4] !== pal[5] && pal[5] !== pal[6] && pal[6] !== pal[7],
+        [pal[4], pal[5], pal[6], pal[7]].join(' '));
+  // 同一个八度内的音必须同色 —— 这才是「分块」而不是渐变。
+  // 注意五声音阶里八度 8 只有一个音（96），所以得挑一个含多个音的八度来验。
+  var byOct = {};
+  win.TM.CONFIG.NOTES.forEach(function (n) {
+    var o = Math.floor(n / 12);
+    (byOct[o] = byOct[o] || []).push(n);
+  });
+  var multiOct = null;
+  for (var ok in byOct) {
+    if (Object.prototype.hasOwnProperty.call(byOct, ok) && byOct[ok].length >= 2) {
+      multiOct = ok;
+      break;
+    }
+  }
+  check('同一八度内的音同色（分块而非渐变）', multiOct !== null &&
+        pal[Math.floor(byOct[multiOct][0] / 12)] ===
+        pal[Math.floor(byOct[multiOct][byOct[multiOct].length - 1] / 12)],
+        multiOct === null ? '找不到含多个音的八度'
+          : '八度 ' + multiOct + ' 共 ' + byOct[multiOct].length + ' 个音');
+
+  // 反向切一次，确认属性 / 变量 / 调色板 / 色阶四处都跟着动，再切回自动
+  var other = theme0 === 'light' ? 'dark' : 'light';
+  var ramp0 = pal[0];
+  win.TM.Theme.set(other);
+  check('切换主题会更新 data-theme',
+        root.getAttribute('data-theme') === other, other);
+
+  var bg1 = win.getComputedStyle(root).getPropertyValue('--bg').trim().toLowerCase();
+  check('切换后 CSS 变量与调色板仍然一致',
+        bg1 === win.TM.CONFIG.COLORS.background.toLowerCase(),
+        bg1 + ' vs ' + win.TM.CONFIG.COLORS.background);
+  check('两个主题的底色不同', bg1 !== bg0, bg0 + ' → ' + bg1);
+  check('切换主题会重建八度配色',
+        win.TM.CONFIG.COLORS.octaveOn[0] !== ramp0,
+        ramp0 + ' → ' + win.TM.CONFIG.COLORS.octaveOn[0]);
+
+  // 浅色主题的主色不许是黑色 —— 这是刻意的设计要求：
+  // 主色要和音高色阶同族（青绿），在白底上作为按钮 / 游标 / 强调色出现。
+  var accentLight = win.getComputedStyle(root).getPropertyValue('--accent').trim();
+  var ac = [
+    parseInt(accentLight.slice(1, 3), 16),
+    parseInt(accentLight.slice(3, 5), 16),
+    parseInt(accentLight.slice(5, 7), 16)
+  ];
+  check('主色不是灰阶（有明确色相）',
+        Math.max(ac[0], ac[1], ac[2]) - Math.min(ac[0], ac[1], ac[2]) > 20,
+        accentLight);
+
+  win.TM.Theme.set(null);
+  check('set(null) 回到跟随系统', win.TM.Theme.isAuto() === true &&
+        root.getAttribute('data-theme') === theme0, root.getAttribute('data-theme'));
+
+  // ── 微光 / 播放列开关（同款 toggle 按钮）───────────────
+  var glow = doc.getElementById('btn-glow');
+  check('存在微光开关按钮', !!glow);
+  check('微光按钮文案是「微光」', glow.textContent.trim() === '微光',
+        glow.textContent.trim());
+  check('微光初始为开', dbg.renderer.showGlow === true &&
+        glow.getAttribute('aria-pressed') === 'true', glow.textContent.trim());
+  glow.click();
+  check('微光点击后为关', dbg.renderer.showGlow === false &&
+        glow.getAttribute('aria-pressed') === 'false', glow.textContent.trim());
+  glow.click();
+  check('微光再点恢复为开', dbg.renderer.showGlow === true &&
+        glow.getAttribute('aria-pressed') === 'true', glow.textContent.trim());
+
+  // ── 微光的合成方向：深色加光、浅色加浓 ─────────────────
+  // 白底上没法「更亮」，用 screen / lighter 只会把格子洗白 —— 那是「变淡」，
+  // 看起来像被关掉了。浅色主题因此走 multiply + 本行格色的浅色版：
+  // 格子沿自己的色相变深变浓，周围散出一圈同色光。
+  (function () {
+    var cv = doc.createElement('canvas');
+    doc.body.appendChild(cv);
+    var g2 = new win.TM.Grid();
+    var r2 = new win.TM.Renderer(cv, g2);
+    g2.set(4, 6, true);              // 这一格会被点亮
+    g2.set(8, 6, true);              // 同一行同色，不点亮（对照组）
+    r2.showPlayhead = false;
+    for (var y = 0; y < r2.rows; y++) {
+      for (var x = 0; x < r2.cols; x++) r2.glow[y][x] = 0;   // 清掉点格子的即时点亮
+    }
+    r2.stepGlow(4, true);
+    r2.composite(4);
+
+    var c2 = cv.getContext('2d');
+    function lum2(col, row) {
+      var d = c2.getImageData(
+        Math.round((col * r2.cell + r2.cell / 2) * r2.scale),
+        Math.round((row * r2.cell + r2.cell / 2) * r2.scale), 1, 1).data;
+      return d[0] * 0.299 + d[1] * 0.587 + d[2] * 0.114;
+    }
+    var lumLit = lum2(4, 6), lumPlain = lum2(8, 6);
+
+    if (win.TM.CONFIG.COLORS.glowComposite === 'multiply') {
+      check('浅色微光是「变浓」而不是「变白」', lumLit < lumPlain - 8,
+            '亮格亮度 ' + lumLit.toFixed(0) + ' vs 未亮 ' + lumPlain.toFixed(0));
+    } else {
+      check('深色微光是「加光变亮」', lumLit > lumPlain + 8,
+            '亮格亮度 ' + lumLit.toFixed(0) + ' vs 未亮 ' + lumPlain.toFixed(0));
+    }
+
+    check('微光的合成方式与主题匹配',
+          win.TM.CONFIG.COLORS.glowComposite ===
+            (win.TM.Theme.current() === 'light' ? 'multiply' : 'lighter'),
+          win.TM.CONFIG.COLORS.glowComposite);
+    cv.parentNode.removeChild(cv);
+  })();
+
+  var head = doc.getElementById('btn-playhead');
+  check('存在播放列开关且初始为开',
+        !!head && head.getAttribute('aria-pressed') === 'true' &&
+        dbg.renderer.showPlayhead === true);
+  head.click();
+  check('播放列可关闭', dbg.renderer.showPlayhead === false &&
+        head.getAttribute('aria-pressed') === 'false');
+  head.click();
+  check('播放列可恢复', dbg.renderer.showPlayhead === true &&
+        head.getAttribute('aria-pressed') === 'true');
+
+  // ── 控件布局：操作行 / 参数行分开 ───────────────────────
+  check('操作行含 5 个按钮（暂停/清空/微光/播放列/谱子）',
+        doc.querySelectorAll('.ctl-actions .btn').length === 5,
+        '实际 ' + doc.querySelectorAll('.ctl-actions .btn').length);
+  check('参数行含 2 个标签（速度/音量）',
+        doc.querySelectorAll('.ctl-fields .f-label').length === 2,
+        '实际 ' + doc.querySelectorAll('.ctl-fields .f-label').length);
+  var volOut = doc.getElementById('volume-out');
+  check('音量显示百分比', volOut && /85/.test(volOut.textContent),
+        volOut ? volOut.textContent.trim() : '缺失');
+
+  // ── 回环区间（入点 / 出点）────────────────────────────
+  // 区间在上方标尺上直接拖把手改，或者在游标处按 I / O。底部没有滑块。
+  var band = doc.getElementById('ruler-band');
+  var dimL = doc.getElementById('ruler-dim-l');
+  var dimR = doc.getElementById('ruler-dim-r');
+  var inH = doc.getElementById('ruler-in');
+  var outH = doc.getElementById('ruler-out-edge');
+  check('标尺上有区间高亮、两侧压暗与两个把手',
+        !!band && !!dimL && !!dimR && !!inH && !!outH);
+  check('底部不再有回环滑块', !doc.getElementById('loop'));
+
+  check('回环初始为整圈',
+        dbg.sequencer.loopIn === 0 && dbg.sequencer.loopOut === 15 &&
+        dbg.renderer.loopIn === 0 && dbg.renderer.loopOut === 15,
+        dbg.sequencer.loopIn + '..' + dbg.sequencer.loopOut);
+  // 整圈时不该把整条标尺染色 —— 没有「区间外」就不该有高亮
+  check('整圈时不显示区间高亮', band.hidden === true && dimL.style.width === '0%',
+        'band.hidden = ' + band.hidden);
+
+  // 采样基线（关掉会自己漂移的微光与播放列）
+  dbg.renderer.setGlowEnabled(false);
+  dbg.renderer.showPlayhead = false;
+  dbg.renderer.composite(0);
+  var CVX = doc.getElementById('matrix').getContext('2d');
+  function pxAt(col, row) {
+    var cell = dbg.renderer.cell;
+    var d = CVX.getImageData(
+      Math.round((col * cell + cell / 2) * dbg.renderer.scale),
+      Math.round((row * cell + cell / 2) * dbg.renderer.scale), 1, 1).data;
+    return d[0] + ',' + d[1] + ',' + d[2];
+  }
+  var baseIn = pxAt(2, 12);
+  var baseOut = pxAt(14, 12);
+
+  function pressKey(key) {
+    doc.body.dispatchEvent(new win.KeyboardEvent('keydown', { key: key, bubbles: true }));
+  }
+  function parkAt(col) {
+    dbg.sequencer.seek(col);
+    dbg.renderer.stepIndex = col;
+  }
+
+  // I / O：在游标处设入点、出点
+  parkAt(2);
+  pressKey('i');
+  check('按 I 在当前游标处设入点', dbg.sequencer.loopIn === 2,
+        '入点 ' + dbg.sequencer.loopIn);
+
+  parkAt(12);
+  pressKey('o');
+  check('按 O 在当前游标处设出点',
+        dbg.sequencer.loopOut === 12 && dbg.sequencer.loopIn === 2,
+        dbg.sequencer.loopIn + '..' + dbg.sequencer.loopOut);
+  check('音序器与渲染器同步',
+        dbg.renderer.loopIn === 2 && dbg.renderer.loopOut === 12,
+        dbg.renderer.loopIn + '..' + dbg.renderer.loopOut);
+
+  // 标尺：2/16 = 12.5%，区间 11 列 = 68.75%，右侧 3 列 = 18.75%
+  check('标尺高亮落在 2..12',
+        Math.abs(parseFloat(band.style.left) - 12.5) < 0.6 &&
+        Math.abs(parseFloat(band.style.width) - 68.75) < 0.6,
+        band.style.left + ' / ' + band.style.width);
+  check('标尺两侧出现压暗',
+        Math.abs(parseFloat(dimL.style.width) - 12.5) < 0.6 &&
+        Math.abs(parseFloat(dimR.style.width) - 18.75) < 0.6,
+        dimL.style.width + ' / ' + dimR.style.width);
+
+  // 压暗块必须真的贴在两端：只写 width 不写锚点是没用的 ——
+  // 曾经 .ruler-dim-r 的 right:0 因为类名写错没生效，整块被摆到了左边，
+  // 结果拖出点时区间高亮的左边界跟着乱走（只有量几何才抓得到）。
+  // rulerEl 在本文件后面才赋值（var 提升但仍是 undefined），这里自己取
+  var rr0 = doc.getElementById('ruler').getBoundingClientRect();
+  var dl0 = dimL.getBoundingClientRect();
+  var dr0 = dimR.getBoundingClientRect();
+  check('左侧压暗从标尺左端开始', Math.abs(dl0.left - rr0.left) < 1.5,
+        Math.round(dl0.left - rr0.left) + 'px');
+  check('右侧压暗贴住标尺右端', Math.abs(dr0.right - rr0.right) < 1.5,
+        Math.round(dr0.right - rr0.right) + 'px');
+
+  // 画面：区间内只叠一层很淡的高亮，区间外被明显压暗。
+  // 注意不能断言「区间内像素完全不变」—— 区间内本来就会铺一层 loopBand。
+  dbg.renderer.composite(0);
+  function rgbDist(a, b) {
+    var x = a.split(','), y = b.split(',');
+    return Math.abs(x[0] - y[0]) + Math.abs(x[1] - y[1]) + Math.abs(x[2] - y[2]);
+  }
+  var nowIn = pxAt(2, 12);
+  var nowOut = pxAt(14, 12);
+  check('区间内基本保持原样（只叠一层很淡的高亮）',
+        rgbDist(nowIn, baseIn) <= 40, baseIn + ' → ' + nowIn);
+  // 深浅两套主题的压暗方向相反（深色压黑、浅色泛白），所以不能写死「变暗」，
+  // 只能比较「区间内外被拉开了多少」—— 这条在两种主题下都成立
+  check('区间内外被明显区分开',
+        rgbDist(nowOut, nowIn) > rgbDist(baseOut, baseIn) + 20,
+        baseIn + ' vs ' + baseOut + ' → ' + nowIn + ' vs ' + nowOut);
+
+  // 拖入点把手：2 → 6
+  var rrect = doc.getElementById('ruler').getBoundingClientRect();
+  function xOf(col) { return rrect.left + (col + 0.5) / 16 * rrect.width; }
+  inH.dispatchEvent(new win.PointerEvent('pointerdown', {
+    bubbles: true, button: 0, pointerId: 31, clientX: xOf(2)
+  }));
+  doc.dispatchEvent(new win.PointerEvent('pointermove', {
+    bubbles: true, pointerId: 31, clientX: xOf(6)
+  }));
+  doc.dispatchEvent(new win.PointerEvent('pointerup', {
+    bubbles: true, pointerId: 31, clientX: xOf(6)
+  }));
+  check('拖入点把手能改区间', dbg.sequencer.loopIn === 6,
+        '入点 ' + dbg.sequencer.loopIn);
+
+  // 入点越过出点时把出点一起推走（而不是静默夹住或反过来）
+  parkAt(13);
+  pressKey('i');
+  check('入点越过出点会把出点一起推走',
+        dbg.sequencer.loopIn === 13 && dbg.sequencer.loopOut === 13,
+        dbg.sequencer.loopIn + '..' + dbg.sequencer.loopOut);
+
+  // 复原整圈
+  parkAt(0);
+  pressKey('i');
+  parkAt(15);
+  pressKey('o');
+  check('可以恢复整圈',
+        dbg.sequencer.loopIn === 0 && dbg.sequencer.loopOut === 15 &&
+        parseFloat(dimL.style.width) === 0,
+        dbg.sequencer.loopIn + '..' + dbg.sequencer.loopOut);
+
+  dbg.renderer.setGlowEnabled(true);
+  dbg.renderer.showPlayhead = true;
+
+  // ── 没有启动遮罩：第一次交互本身就是解锁手势 ────────────
+  // 曾经有个全屏遮罩，要求「先点一下启用声音」。浏览器确实规定 AudioContext
+  // 要在用户手势里才能启动，但这个页面上每个动作本身就是手势（点格子 / 拖游标 /
+  // 空格 / 播放），遮罩既多余，又用一层半透明盖住了谱子 —— 已删除。
+  var play = doc.getElementById('btn-toggle');
+
+  check('页面里没有启动遮罩（不再需要先点一下）',
+        !doc.getElementById('overlay') && !doc.querySelector('.overlay'));
+  check('打开页面时音频尚未启动（没有偷跑）', dbg.audio.ready === false,
+        'audio.ready = ' + dbg.audio.ready);
+  check('未播放时按钮写着「播放」', play.textContent.trim() === '播放',
+        play.textContent.trim());
+
+  // 第一次点「播放」= 解锁音频 + 真的开始播，中间不该还有别的门
+  play.click();
+  // 注意：不能等 audio.ready —— 它在 buildGraph 里就置位了，
+  // 早于 audio.start() 的 then 回调执行 sequencer.start()。
+  var started = await waitFor(function () { return dbg.sequencer.playing; }, 3000,
+                              '等待进入播放状态');
+  info('音频就绪', dbg.audio.ready + '，播放中 = ' + dbg.sequencer.playing);
+  check('一次点击同时解锁音频并开始播放', started && dbg.audio.ready === true,
+        'ready = ' + dbg.audio.ready + '，playing = ' + dbg.sequencer.playing);
+  // ready 只说明「图建好了」，真的在响要看上下文状态 —— app 的 audioLive()
+  // 正是拿它当闸门，所以这里直接把契约锁住
+  check('点击后音频上下文真的进入 running',
+        !!dbg.audio.ctx && dbg.audio.ctx.state === 'running',
+        'state = ' + (dbg.audio.ctx ? dbg.audio.ctx.state : '无上下文'));
+  check('启动后进入播放状态', started && dbg.sequencer.playing === true,
+        'playing = ' + dbg.sequencer.playing);
+  check('按钮文案与状态一致', play.textContent.trim() === '暂停',
+        play.textContent.trim());
+
+  // ── 基准版没有示例谱 ───────────────────────────────────
+  // 全曲 897 列装不进 16 列，载进来只剩 9 个音 —— 那不是「短一点」，是听不出曲子。
+  // 所以这一页不给 chip。
+  check('基准版没有示例行（连「示例」标签都不在）', !doc.getElementById('presets'));
+  check('基准版没有示例 chip',
+        doc.querySelectorAll('#presets .chip').length === 0,
+        doc.querySelectorAll('#presets .chip').length + ' 个');
+  // 全站都取消了「空棋盘首播自动装示例」：按播放就是播当前这张空棋盘（安静），
+  // 想听示例走 chip 或 ?demo=<id>，别让它背地里替你做主。
+  check('空棋盘按播放不会凭空出现谱子',
+        dbg.grid.count() === 0, '音符数 = ' + dbg.grid.count());
+
+  // ── 空格 = 暂停 / 继续 ─────────────────────────────────
+  function pressSpace() {
+    win.dispatchEvent(new win.KeyboardEvent('keydown',
+      { code: 'Space', key: ' ', bubbles: true }));
+  }
+
+  pressSpace();
+  await waitFor(function () { return dbg.sequencer.playing === false; }, 800);
+  check('空格：暂停', dbg.sequencer.playing === false,
+        'playing = ' + dbg.sequencer.playing);
+  check('暂停后按钮变为「播放」', play.textContent.trim() === '播放',
+        play.textContent.trim());
+
+  pressSpace();
+  await waitFor(function () { return dbg.sequencer.playing === true; }, 800);
+  check('空格：继续', dbg.sequencer.playing === true,
+        'playing = ' + dbg.sequencer.playing);
+
+  // 继续播放必须**接着走**，不能回到第 0 步 —— start() 里曾经写死
+  // currentStep = 0，每按一次空格继续都从头重放。
+  // 这里把步号摆到 9 再走一次 stop → start：写死归零的话首排步号会是 0。
+  dbg.sequencer.stop();
+  dbg.sequencer.currentStep = 9;
+  dbg.sequencer.start();
+  check('空格继续：接着第 9 步走（没有回到第 0 步）',
+        dbg.sequencer.playing === true &&
+        dbg.sequencer.timeline.length > 0 &&
+        dbg.sequencer.timeline[0].step === 9,
+        '首排步号 ' + (dbg.sequencer.timeline.length
+          ? dbg.sequencer.timeline[0].step : '—'));
+
+  // ── 播放位置标尺：鼠标点 / 拖控制游标 ──────────────────
+  var rulerEl = doc.getElementById('ruler');
+  var cursorEl = doc.getElementById('ruler-cursor');
+
+  // 注意：`canvas` 这个变量在本文件后面才赋值，这里自己取一次引用
+  var canvasEl = doc.getElementById('matrix');
+
+  check('存在播放位置标尺与游标', !!rulerEl && !!cursorEl);
+  check('没有「已播进度」条（游标到入点之间不该加深）',
+        !doc.getElementById('ruler-fill'));
+  // 游标是一格宽的块，不是细线 —— 细线留给入点 / 出点
+  check('游标是一整格宽的竖条',
+        Math.abs(cursorEl.getBoundingClientRect().width -
+                 rulerEl.getBoundingClientRect().width / 16) < 1.5,
+        Math.round(cursorEl.getBoundingClientRect().width) + 'px vs 一格 ' +
+        Math.round(rulerEl.getBoundingClientRect().width / 16) + 'px');
+  // 游标颜色必须不透明：半透明的话，拖出点时区间高亮的边界会从块内部扫过，
+  // 叠出一块更深的子区域 —— 看起来就像游标在左右伸缩
+  check('游标颜色不透明（不被底下的区间高亮染色）',
+        /^rgb\(/.test(win.getComputedStyle(cursorEl).backgroundColor),
+        win.getComputedStyle(cursorEl).backgroundColor);
+  check('标尺宽度与棋盘一致（位置才能对应到列）',
+        Math.abs(rulerEl.getBoundingClientRect().width -
+                 canvasEl.getBoundingClientRect().width) < 1.5,
+        Math.round(rulerEl.getBoundingClientRect().width) + ' vs 棋盘 ' +
+        Math.round(canvasEl.getBoundingClientRect().width));
+
+  function scrub(col, type, pointerId) {
+    var r = rulerEl.getBoundingClientRect();
+    rulerEl.dispatchEvent(new win.PointerEvent(type, {
+      clientX: r.left + r.width * ((col + 0.5) / 16),
+      clientY: r.top + r.height / 2,
+      bubbles: true, cancelable: true, pointerId: pointerId || 21, isPrimary: true
+    }));
+  }
+
+  dbg.sequencer.stop();
+  scrub(11, 'pointerdown');
+  check('暂停时点标尺也能把游标挪过去（第 11 列）',
+        dbg.sequencer.currentStep === 11 && dbg.renderer.stepIndex === 11,
+        'currentStep = ' + dbg.sequencer.currentStep +
+        '，renderer.stepIndex = ' + dbg.renderer.stepIndex);
+  check('标尺游标同步画到第 11 列',
+        Math.abs(parseFloat(cursorEl.style.left) - 11 / 16 * 100) < 0.01,
+        cursorEl.style.left);
+
+  scrub(3, 'pointermove');                      // 按住不放继续拖 = 擦洗
+  check('按住拖动能连续擦洗到第 3 列', dbg.sequencer.currentStep === 3,
+        'currentStep = ' + dbg.sequencer.currentStep);
+  scrub(3, 'pointerup');
+
+  dbg.sequencer.start();
+  scrub(5, 'pointerdown');
+  // 播放中 seek 会立刻补排一步，然后 currentStep 前进到「下一个待排的步」——
+  // 和 start() 的语义一致（它指向下一步，不是刚排的那一步）。
+  check('播放中也能跳（跳转后立刻排的是第 5 步）',
+        dbg.sequencer.timeline.length > 0 && dbg.sequencer.timeline[0].step === 5,
+        '首排步号 ' + (dbg.sequencer.timeline.length
+          ? dbg.sequencer.timeline[0].step : '—'));
+  check('跳转后步号继续前进', dbg.sequencer.currentStep === 6,
+        'currentStep = ' + dbg.sequencer.currentStep);
+  scrub(5, 'pointerup');
+
+  // ── 点按 / 空格 / 清空 对网格的影响 ────────────────────
+  var canvas = doc.getElementById('matrix');
+  var rect = canvas.getBoundingClientRect();
+
+  function tap(pointerId) {
+    canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+      clientX: rect.left + rect.width / 32,
+      clientY: rect.top + rect.height / 32,
+      bubbles: true, pointerId: pointerId, isPrimary: true
+    }));
+  }
+
+  check('初始网格为空', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+
+  tap(1);
+  await waitFor(function () { return dbg.grid.get(0, 0) === true; }, 800);
+  check('点按点亮 cell(0,0)', dbg.grid.get(0, 0) === true);
+  check('只点亮一格', dbg.grid.count() === 1, 'count = ' + dbg.grid.count());
+
+  pressSpace();
+  await wait(250);
+  check('空格不清空网格', dbg.grid.count() === 1, 'count = ' + dbg.grid.count());
+  check('空格只切播放，不影响格子', dbg.grid.get(0, 0) === true);
+
+  pressSpace();     // 恢复播放状态
+
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  check('清空按钮仍然清空网格', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+
+  // ── 右键试听（只发声，不改动图案、不改格子外观）────────
+  var played = [];
+  var origSynth = dbg.audio.synthNote;
+  dbg.audio.synthNote = function (note, when) {
+    played.push(note);
+    return origSynth.call(this, note, when);
+  };
+
+  function at(col, row) {
+    return {
+      clientX: rect.left + rect.width * ((col + 0.5) / 16),
+      clientY: rect.top + rect.height * ((row + 0.5) / 16)
+    };
+  }
+
+  /**
+   * 模拟真实右键：浏览器会**先**派发 pointerdown(button=2)，
+   * 再派发 contextmenu。只派发 contextmenu 是测不出问题的
+   * （早期版本就是漏了这个才让右键把格子翻转了）。
+   */
+  function rightClick(col, row) {
+    var p = at(col, row);
+    canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+      clientX: p.clientX, clientY: p.clientY,
+      bubbles: true, cancelable: true, pointerId: 9, isPrimary: true, button: 2, buttons: 2
+    }));
+    canvas.dispatchEvent(new win.MouseEvent('contextmenu', {
+      clientX: p.clientX, clientY: p.clientY, bubbles: true, cancelable: true
+    }));
+  }
+
+  check('试听前网格为空', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+
+  rightClick(2, 5);
+  check('右键在那一格套上描边（告诉用户按的是哪格）',
+        dbg.renderer.highlights.length === 1 &&
+        dbg.renderer.highlights[0].col === 2 && dbg.renderer.highlights[0].row === 5,
+        dbg.renderer.highlights.length
+          ? '(' + dbg.renderer.highlights[0].col + ',' + dbg.renderer.highlights[0].row + ')'
+          : '无描边');
+
+  var gotSound = await waitFor(function () { return played.length > 0; }, 1500,
+                               '等待右键试听发声');
+  check('右键触发发声', gotSound && played.length === 1, '调用 ' + played.length + ' 次');
+  check('音高 = NOTES[行]（第 5 行 → 84）',
+        played[0] === win.TM.CONFIG.NOTES[5],
+        'note = ' + played[0] + '，期望 ' + win.TM.CONFIG.NOTES[5]);
+
+  // 这两条是本轮的核心：右键绝不能改动图案
+  await wait(200);
+  check('右键不改动图案', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+  check('右键不翻转该格', dbg.grid.get(2, 5) === false,
+        'cell(2,5) = ' + dbg.grid.get(2, 5));
+
+  played.length = 0;
+  rightClick(2, 11);
+  await waitFor(function () { return played.length > 0; }, 1500);
+  check('不同行试听不同音高（第 11 行 → 69）',
+        played[0] === win.TM.CONFIG.NOTES[11],
+        'note = ' + played[0] + '，期望 ' + win.TM.CONFIG.NOTES[11]);
+  check('多次右键仍不改动图案', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+
+  // 左键仍然正常翻转（确认按键判断没有误伤左键）
+  var p5 = at(4, 3);
+  canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: p5.clientX, clientY: p5.clientY,
+    bubbles: true, cancelable: true, pointerId: 10, isPrimary: true, button: 0, buttons: 1
+  }));
+  await waitFor(function () { return dbg.grid.get(4, 3) === true; }, 800);
+  check('左键仍然正常点亮（按键判断没误伤）', dbg.grid.get(4, 3) === true,
+        'cell(4,3) = ' + dbg.grid.get(4, 3));
+  var p5b = at(4, 3);
+  canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: p5b.clientX, clientY: p5b.clientY,
+    bubbles: true, cancelable: true, pointerId: 11, isPrimary: true, button: 0, buttons: 1
+  }));
+  await waitFor(function () { return dbg.grid.get(4, 3) === false; }, 800);
+  check('左键再点可关掉', dbg.grid.get(4, 3) === false);
+
+  // 点到画布外不应发声
+  played.length = 0;
+  canvas.dispatchEvent(new win.MouseEvent('contextmenu', {
+    clientX: rect.left - 20, clientY: rect.top - 20, bubbles: true, cancelable: true
+  }));
+  await wait(200);
+  check('右键画布外不发声', played.length === 0, '调用 ' + played.length + ' 次');
+
+  delete dbg.audio.synthNote;              // 还原，避免影响后续断言
+
+  // ── 微光关闭时点按仍然可用 ─────────────────────────────
+  glow.click();
+  check('微光已关闭', dbg.renderer.showGlow === false);
+  tap(2);
+  await waitFor(function () { return dbg.grid.get(0, 0) === true; }, 800);
+  check('微光关闭时仍能正常点格子', dbg.grid.get(0, 0) === true);
+
+  // ── 渲染管线（显式合成一帧，不依赖 rAF 节奏）───────────
+  var ctx = canvas.getContext('2d');
+  var D = canvas.width;
+  dbg.renderer.showPlayhead = false;
+  dbg.renderer.composite(0);
+  var px = Math.round(0.5 * D / 16), py = Math.round(0.5 * D / 16);
+  var got = ctx.getImageData(px, py, 1, 1).data;
+  // 期望色取当前主题音高色阶的**行 0**（最高音）；格子现在带色相，
+  // 不能再用单一亮度值断言，要比三个通道。
+  // 颜色按八度取：行 0 的音高落在哪个八度，就用那一档
+  var note0 = win.TM.RUNTIME.notes[0];
+  var wantHex = win.TM.CONFIG.COLORS.octaveOn[Math.floor(note0 / 12)];
+  var want = [
+    parseInt(wantHex.slice(1, 3), 16),
+    parseInt(wantHex.slice(3, 5), 16),
+    parseInt(wantHex.slice(5, 7), 16)
+  ];
+  check('合成后画面确实是亮格（含渲染链路）',
+        Math.abs(got[0] - want[0]) <= 2 && Math.abs(got[1] - want[1]) <= 2 &&
+        Math.abs(got[2] - want[2]) <= 2,
+        '[' + got[0] + ',' + got[1] + ',' + got[2] + '] 期望 [' + want.join(',') + ']');
+
+  // ── 乐谱：自动保存 / 导出 / 载入 ───────────────────────
+  var shareBtn = doc.getElementById('btn-share');
+  var shareRow = doc.getElementById('share-row');
+  var shareCode = doc.getElementById('share-code');
+  var shareStatus = doc.getElementById('share-status');
+  var btnLoad = doc.getElementById('btn-share-load');
+
+  check('存在「谱子」按钮与分享面板',
+        !!shareBtn && !!shareRow && !!shareCode && !!shareStatus);
+
+  // 面板里的代码 = 当前音符 + 当前参数，所以测试也照这个口径生成
+  function encodeNow() {
+    return win.TM.Store.encode(dbg.grid, undefined, {
+      bpm: parseInt(doc.getElementById('tempo').value, 10),
+      vol: parseInt(doc.getElementById('volume').value, 10),
+      loopIn: dbg.sequencer.loopIn,
+      loopOut: dbg.sequencer.loopOut
+    });
+  }
+  check('分享面板默认收起',
+        shareRow.hidden === true && shareBtn.getAttribute('aria-expanded') === 'false');
+  check('收起时面板不占位（display 真的被隐藏）',
+        win.getComputedStyle(shareRow).display === 'none',
+        win.getComputedStyle(shareRow).display);
+
+  shareBtn.click();
+  check('点「谱子」展开面板',
+        shareRow.hidden === false && shareBtn.getAttribute('aria-expanded') === 'true');
+  check('展开后自动填入当前乐谱的代码',
+        /^MM3\./.test(shareCode.value), shareCode.value.slice(0, 18) + '…');
+  check('填入的代码与当前谱子一致',
+        shareCode.value === encodeNow());
+
+  // ── 面板里的代码跟着谱子实时更新 ───────────────────────
+  dbg.grid.clear();
+  dbg.grid.set(1, 2, true);
+  dbg.grid.set(5, 6, true);
+  dbg.grid.set(15, 0, true);
+  var codeA = encodeNow();
+
+  dbg.grid.clear();                       // 谱子变了，面板里的代码应该立刻跟着变
+  dbg.grid.set(9, 9, true);
+  check('面板展开时，代码跟着谱子实时更新',
+        shareCode.value === encodeNow() &&
+        shareCode.value !== codeA,
+        shareCode.value.slice(0, 16) + '…');
+
+  // 但用户正在粘代码时不能冲掉它
+  shareCode.value = codeA;
+  dbg.grid.set(11, 11, true);             // 面板里已经是「别人的代码」了
+  check('用户粘进面板的内容不会被改动冲掉',
+        shareCode.value === codeA, shareCode.value.slice(0, 16) + '…');
+
+  btnLoad.click();
+  check('把粘进来的代码载入能还原',
+        dbg.grid.count() === 3 && dbg.grid.get(1, 2) &&
+        dbg.grid.get(5, 6) && dbg.grid.get(15, 0),
+        'count = ' + dbg.grid.count());
+  check('载入成功后给出状态提示', /已载入/.test(shareStatus.textContent),
+        shareStatus.textContent);
+  check('载入后面板里换成本面板的标准写法',
+        shareCode.value === encodeNow());
+
+  // ── 代码带走的是「整份工程状态」，不只是音符 ─────────────
+  // 别人打开你的链接，听到的必须就是**你做的那个工程**：速度、音量、回环全要跟着走。
+  var srcState = new win.TM.Grid();
+  srcState.set(2, 3, true);
+  shareCode.value = win.TM.Store.encode(srcState, undefined,
+    { bpm: 97, vol: 41, loopIn: 2, loopOut: 7 });
+  btnLoad.click();
+
+  check('载入后速度被套用（滑块 / 读数 / 音序器三处）',
+        doc.getElementById('tempo').value === '97' &&
+        /97/.test(doc.getElementById('tempo-out').textContent) &&
+        dbg.sequencer.tempo === 97,
+        doc.getElementById('tempo-out').textContent + ' / tempo ' + dbg.sequencer.tempo);
+  check('载入后音量被套用（滑块 / 读数 / 音频引擎）',
+        doc.getElementById('volume').value === '41' &&
+        /41/.test(doc.getElementById('volume-out').textContent) &&
+        Math.abs(dbg.audio.volume - 0.41) < 1e-6,
+        doc.getElementById('volume-out').textContent);
+  check('载入后回环区间被套用（音序器 / 画布 / 标尺高亮）',
+        dbg.sequencer.loopIn === 2 && dbg.sequencer.loopOut === 7 &&
+        dbg.renderer.loopIn === 2 && dbg.renderer.loopOut === 7 &&
+        Math.abs(parseFloat(doc.getElementById('ruler-band').style.width) - 37.5) < 0.6,
+        dbg.sequencer.loopIn + '..' + dbg.sequencer.loopOut + ' / 高亮 ' +
+        doc.getElementById('ruler-band').style.width);
+  check('载入后代码被规整成「这份工程」，参数一切照旧',
+        shareCode.value === encodeNow());
+
+  // 反过来：改参数本身也要让代码实时更新
+  doc.getElementById('tempo').value = '140';
+  doc.getElementById('tempo').dispatchEvent(new win.Event('input', { bubbles: true }));
+  var decTempo = win.TM.Store.decode(shareCode.value);
+  check('拖动速度滑块后，代码里的 bpm 跟着变',
+        decTempo.ok && decTempo.params.bpm === 140,
+        decTempo.ok ? JSON.stringify(decTempo.params) : decTempo.error);
+
+  doc.getElementById('volume').value = '55';
+  doc.getElementById('volume').dispatchEvent(new win.Event('input', { bubbles: true }));
+  var decVol = win.TM.Store.decode(shareCode.value);
+  check('拖动音量滑块后，代码里的 vol 跟着变',
+        decVol.ok && decVol.params.vol === 55,
+        decVol.ok ? JSON.stringify(decVol.params) : decVol.error);
+
+  var decLoop = win.TM.Store.decode(shareCode.value);
+  check('代码里的回环与界面一致',
+        decLoop.ok && decLoop.params.loopIn === 2 && decLoop.params.loopOut === 7,
+        decLoop.ok ? JSON.stringify(decLoop.params) : decLoop.error);
+
+  // 坏输入：必须报错，且**不能**把当前谱子改坏
+  var keep = dbg.grid.count();
+  shareCode.value = 'MM2.$$$';
+  btnLoad.click();
+  check('乱码代码给出失败提示', /载入失败/.test(shareStatus.textContent),
+        shareStatus.textContent);
+  check('载入失败时不改动当前谱子', dbg.grid.count() === keep,
+        'count = ' + dbg.grid.count());
+
+  // 另一套尺寸的谱子现在**能**载入（MM2 按音高走，不是按行号），
+  // 只是会如实报告落位情况 —— 这正是「换面板后数据还能用」的体现
+  var other = new win.TM.Grid({ cols: 8, rows: 8 });
+  other.set(1, 1, true);                       // 8 行表里的行 1 → 音高 93
+  shareCode.value = win.TM.Store.encode(other);
+  btnLoad.click();
+  check('别的尺寸的谱子能载入（旧格式会直接拒绝）',
+        /已载入/.test(shareStatus.textContent), shareStatus.textContent);
+  check('跨尺寸载入后按音高落在正确的行上',
+        dbg.grid.count() === 1 && dbg.grid.get(1, win.TM.CONFIG.NOTES.indexOf(93)),
+        'count = ' + dbg.grid.count() + '，音高 93 在第 ' +
+        win.TM.CONFIG.NOTES.indexOf(93) + ' 行');
+
+  // 自动保存：改动后防抖 300ms 落进 localStorage
+  shareCode.value = codeA;
+  btnLoad.click();
+  await wait(600);
+  var stored = null;
+  try { stored = localStorage.getItem('matrixmusic.score.small'); } catch (e) { /* 忽略 */ }
+  check('改动后自动写进 localStorage',
+        stored === encodeNow(),
+        stored ? stored.slice(0, 18) + '…' : '没读到');
+
+  // 「复制」在没有可用 clipboard 的环境（file:// 无用户手势）要优雅降级：
+  // 反馈必须**同步**出现，不能挂在可能永不 settle 的 writeText promise 上
+  var threwCopy = false;
+  try { doc.getElementById('btn-share-copy').click(); } catch (e) { threwCopy = true; }
+  check('点「复制」不抛异常', threwCopy === false);
+  check('点「复制」同步给出反馈（不依赖 clipboard promise）',
+        /复制|选中/.test(shareStatus.textContent), shareStatus.textContent);
+  check('点「复制」会选中整段代码（可手动 ⌘C）',
+        shareCode.selectionStart === 0 &&
+        shareCode.selectionEnd === shareCode.value.length,
+        shareCode.selectionStart + '–' + shareCode.selectionEnd);
+
+  shareBtn.click();
+  check('再点「谱子」收起面板', shareRow.hidden === true);
+
+  // ── 撤销 / 反撤销 ──────────────────────────────────────
+  function pressKey(key, opts) {
+    opts = opts || {};
+    win.dispatchEvent(new win.KeyboardEvent('keydown', {
+      key: key, code: opts.code || '', bubbles: true, cancelable: true,
+      metaKey: !!opts.meta, shiftKey: !!opts.shift
+    }));
+  }
+  var mtx = doc.getElementById('matrix');
+  function ptAt(col, row) {
+    var r = mtx.getBoundingClientRect();
+    return { clientX: r.left + r.width * ((col + 0.5) / 16),
+             clientY: r.top + r.height * ((row + 0.5) / 16) };
+  }
+  function tapAt(col, row, id) {
+    var p = ptAt(col, row);
+    mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
+      clientX: p.clientX, clientY: p.clientY,
+      bubbles: true, cancelable: true, pointerId: id, isPrimary: true
+    }));
+  }
+  function dragTo(col, row, id) {
+    var p = ptAt(col, row);
+    mtx.dispatchEvent(new win.PointerEvent('pointermove', {
+      clientX: p.clientX, clientY: p.clientY,
+      bubbles: true, cancelable: true, pointerId: id, isPrimary: true
+    }));
+  }
+  function dropPointer(id) {
+    mtx.dispatchEvent(new win.PointerEvent('pointerup', {
+      clientX: 0, clientY: 0, bubbles: true, pointerId: id, isPrimary: true
+    }));
+  }
+
+  // 先立一个非空的基准状态，好验证「撤销清空」确实把东西还回来了
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  tapAt(6, 6, 41);
+  await waitFor(function () { return dbg.grid.get(6, 6) === true; }, 800);
+  dropPointer(41);
+  var baseCount = dbg.grid.count();
+  check('撤销测试的基准状态非空', baseCount === 1, 'count = ' + baseCount);
+
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  tapAt(2, 2, 42);
+  await waitFor(function () { return dbg.grid.get(2, 2) === true; }, 800);
+  dropPointer(42);
+  tapAt(3, 3, 43);
+  await waitFor(function () { return dbg.grid.get(3, 3) === true; }, 800);
+  dropPointer(43);
+  check('准备：两格点亮', dbg.grid.count() === 2, 'count = ' + dbg.grid.count());
+
+  pressKey('z', { meta: true });
+  check('⌘Z 撤销上一步（只退掉后点的那格）',
+        dbg.grid.count() === 1 && dbg.grid.get(2, 2) && !dbg.grid.get(3, 3),
+        'count = ' + dbg.grid.count());
+
+  pressKey('z', { meta: true, shift: true });
+  check('⌘⇧Z 反撤销（两格都回来）', dbg.grid.count() === 2,
+        'count = ' + dbg.grid.count());
+
+  pressKey('z', { meta: true });          // 撤销 tap(3,3)
+  pressKey('z', { meta: true });          // 撤销 tap(2,2)
+  check('连续撤销能退到清空之后', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+  pressKey('z', { meta: true });          // 再退一步 = 撤销「清空」本身
+  check('撤销也能还原「清空」', dbg.grid.count() === baseCount,
+        dbg.grid.count() + ' vs 清空前 ' + baseCount);
+
+  // 拖动涂一整条 = **一步**撤销（不是每格一步）
+  var beforeDrag = dbg.grid.count();
+  tapAt(0, 9, 51);
+  for (var dc = 1; dc <= 7; dc++) dragTo(dc, 9, 51);
+  dropPointer(51);
+  check('一次拖动涂了 8 格', dbg.grid.count() - beforeDrag === 8,
+        '涂了 ' + (dbg.grid.count() - beforeDrag) + ' 格');
+  pressKey('z', { meta: true });
+  check('一次拖动只占一步撤销（整条一起退）', dbg.grid.count() === beforeDrag,
+        dbg.grid.count() + ' vs ' + beforeDrag);
+
+  // 焦点在「谱子」输入框里时，⌘Z 要交给浏览器，别去撤销棋盘
+  var keepCount = dbg.grid.count();
+  shareCode.dispatchEvent(new win.KeyboardEvent('keydown', {
+    key: 'z', metaKey: true, bubbles: true, cancelable: true
+  }));
+  check('焦点在输入框里时 ⌘Z 不撤销棋盘',
+        dbg.grid.count() === keepCount, 'count = ' + dbg.grid.count());
+
+  // ── 框选：Alt 拉框 / 整体搬动 / X 删除 / A 填充 ─────────
+  function altDrag(c0, r0, c1, r1, id) {
+    var a = ptAt(c0, r0), b = ptAt(c1, r1);
+    mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
+      clientX: a.clientX, clientY: a.clientY, altKey: true,
+      bubbles: true, cancelable: true, pointerId: id, isPrimary: true
+    }));
+    mtx.dispatchEvent(new win.PointerEvent('pointermove', {
+      clientX: b.clientX, clientY: b.clientY, altKey: true,
+      bubbles: true, cancelable: true, pointerId: id, isPrimary: true
+    }));
+    dropPointer(id);
+  }
+  function key(k) {
+    win.dispatchEvent(new win.KeyboardEvent('keydown', {
+      key: k, bubbles: true, cancelable: true
+    }));
+  }
+
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  dbg.grid.set(2, 2, true); dbg.grid.set(3, 2, true);
+  dbg.grid.set(2, 3, true); dbg.grid.set(3, 3, true);
+  check('准备：一个 2×2 的块', dbg.grid.count() === 4, 'count = ' + dbg.grid.count());
+  check('初始没有选区', dbg.renderer.selection === null);
+
+  altDrag(1, 1, 4, 4, 61);
+  var sel = dbg.renderer.selection;
+  check('Alt + 左键拖动拉出选区', !!sel, sel ? JSON.stringify(sel) : '无选区');
+  check('选区矩形含起止两端',
+        sel && sel.col0 === 1 && sel.row0 === 1 && sel.col1 === 4 && sel.row1 === 4,
+        sel ? JSON.stringify(sel) : '');
+
+  altDrag(6, 6, 4, 4, 62);                 // 反向拖（右下 → 左上）
+  sel = dbg.renderer.selection;
+  check('反方向拖动会归一化',
+        sel && sel.col0 === 4 && sel.row0 === 4 && sel.col1 === 6 && sel.row1 === 6,
+        sel ? JSON.stringify(sel) : '');
+
+  // 在选区内按住左键 → 整体搬走
+  altDrag(1, 1, 4, 4, 63);
+  var beforeMove = dbg.grid.count();
+  var pd = ptAt(2, 2);                     // 按在选区内
+  mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: pd.clientX, clientY: pd.clientY,
+    bubbles: true, cancelable: true, pointerId: 64, isPrimary: true
+  }));
+  var pm = ptAt(3, 5);                     // 往右下挪（+1 列 +3 行）
+  mtx.dispatchEvent(new win.PointerEvent('pointermove', {
+    clientX: pm.clientX, clientY: pm.clientY,
+    bubbles: true, cancelable: true, pointerId: 64, isPrimary: true
+  }));
+  dropPointer(64);
+  check('整体搬动不改变音符个数', dbg.grid.count() === beforeMove,
+        dbg.grid.count() + ' vs ' + beforeMove);
+  check('块搬到了新位置、原位置已清空',
+        dbg.grid.get(3, 5) && dbg.grid.get(4, 5) &&
+        dbg.grid.get(3, 6) && dbg.grid.get(4, 6) &&
+        !dbg.grid.get(2, 2) && !dbg.grid.get(2, 3),
+        'count = ' + dbg.grid.count());
+  check('选区跟着块一起过去',
+        dbg.renderer.selection.col0 === 2 && dbg.renderer.selection.row0 === 4 &&
+        dbg.renderer.selection.col1 === 5 && dbg.renderer.selection.row1 === 7,
+        JSON.stringify(dbg.renderer.selection));
+  pressKey('z', { meta: true });           // 整次搬动应该只占一步
+  check('整次搬动只占一步撤销（块回到原处）',
+        dbg.grid.get(2, 2) && dbg.grid.get(3, 3) && !dbg.grid.get(3, 5),
+        'count = ' + dbg.grid.count());
+  pressKey('z', { meta: true, shift: true });
+
+  // X 删除选区内的音符（重新铺一个块，别依赖上面那串搬动之后的落点）
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  dbg.grid.set(2, 2, true); dbg.grid.set(3, 2, true);
+  dbg.grid.set(2, 3, true); dbg.grid.set(3, 3, true);
+  altDrag(1, 1, 4, 4, 65);
+  var beforeX = dbg.grid.count();
+  check('准备：块确实落在选区内', beforeX === 4, 'count = ' + beforeX);
+  key('x');
+  check('X 删除选区内的音符', dbg.grid.count() === beforeX - 4,
+        dbg.grid.count() + ' vs ' + beforeX);
+  check('删除后选区还在（方便继续操作）', !!dbg.renderer.selection);
+  pressKey('z', { meta: true });
+  check('删除可以撤销', dbg.grid.count() === beforeX, 'count = ' + dbg.grid.count());
+
+  // A 填满选区
+  dbg.grid.clear();
+  altDrag(5, 5, 7, 7, 66);
+  key('a');
+  check('A 填满选区（3×3 = 9 格）', dbg.grid.count() === 9, 'count = ' + dbg.grid.count());
+  pressKey('z', { meta: true });
+  check('填充可以撤销', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+
+  // 拖出棋盘要被夹住：整块还在，只是贴到边界
+  dbg.grid.clear();
+  dbg.grid.set(2, 2, true); dbg.grid.set(3, 2, true);
+  dbg.grid.set(2, 3, true); dbg.grid.set(3, 3, true);
+  altDrag(1, 1, 4, 4, 70);
+  var countBeforeFar = dbg.grid.count();
+  var pf0 = ptAt(2, 2);
+  mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: pf0.clientX, clientY: pf0.clientY,
+    bubbles: true, cancelable: true, pointerId: 71, isPrimary: true
+  }));
+  var pf1 = ptAt(15, 15);                  // 远远拖出右下角
+  mtx.dispatchEvent(new win.PointerEvent('pointermove', {
+    clientX: pf1.clientX, clientY: pf1.clientY,
+    bubbles: true, cancelable: true, pointerId: 71, isPrimary: true
+  }));
+  dropPointer(71);
+  check('拖出边界会被夹住，音符一个不少', dbg.grid.count() === countBeforeFar,
+        dbg.grid.count() + ' vs ' + countBeforeFar);
+  check('夹住后整块贴到右下角',
+        dbg.grid.get(13, 13) && dbg.grid.get(14, 13) &&
+        dbg.grid.get(13, 14) && dbg.grid.get(14, 14),
+        'count = ' + dbg.grid.count());
+
+  // Esc 取消选区
+  key('Escape');
+  check('Esc 取消选区', dbg.renderer.selection === null);
+
+  // 点画布**外面**的留白也要取消选择（那些区域到不了 canvas 的 pointerdown）
+  altDrag(2, 2, 4, 4, 72);
+  check('准备：有选区', !!dbg.renderer.selection);
+  doc.body.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: 5, clientY: 5, bubbles: true, cancelable: true,
+    pointerId: 73, isPrimary: true
+  }));
+  check('点画布外的页面留白会取消选择', dbg.renderer.selection === null,
+        JSON.stringify(dbg.renderer.selection));
+
+  // 但点控件不该取消（正在调速度 / 音量 / 按播放时选区应该留着）
+  altDrag(2, 2, 4, 4, 74);
+  doc.getElementById('btn-glow').dispatchEvent(new win.PointerEvent('pointerdown', {
+    bubbles: true, cancelable: true, pointerId: 75, isPrimary: true
+  }));
+  check('点控件不会取消选择', !!dbg.renderer.selection,
+        JSON.stringify(dbg.renderer.selection));
+
+  // 点在选区外 → 取消选择 + 正常涂抹
+  altDrag(2, 2, 4, 4, 67);
+  check('重新拉出选区', !!dbg.renderer.selection);
+  tapAt(10, 10, 68);
+  dropPointer(68);
+  check('点选区外会取消选择', dbg.renderer.selection === null);
+  check('点选区外同时正常点亮那一格', dbg.grid.get(10, 10) === true);
+
+  // 焦点在输入框里时，X / A 不能去动选区。
+  // 注意：选区内**必须真的有音符**，否则删掉也不会变，这条断言就成了摆设。
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  dbg.grid.set(1, 1, true);
+  dbg.grid.set(2, 2, true);
+  altDrag(1, 1, 3, 3, 69);
+  var beforeKeys = dbg.grid.count();
+  check('准备：选区内确实有音符', beforeKeys === 2 && !!dbg.renderer.selection,
+        'count = ' + beforeKeys);
+  shareCode.dispatchEvent(new win.KeyboardEvent('keydown', {
+    key: 'x', bubbles: true, cancelable: true
+  }));
+  check('焦点在输入框时 X 不动选区',
+        dbg.grid.count() === beforeKeys && !!dbg.renderer.selection,
+        'count = ' + dbg.grid.count());
+
+  report();
+}
+</script>
+</body>
+</html>

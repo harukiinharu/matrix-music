@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Matrix Music</title>
+<meta name="theme-color" content="#000000">
+<script>
+  /* 首屏防闪：在样式表生效前先按系统偏好把主题定下来，
+     不要等 theme.js 执行 —— 否则浅色系统上会先闪一下黑底。 */
+  (function () {
+    var m = /[?&]theme=(dark|light)(?:&|$)/.exec(location.search);
+    var t = m && m[1];
+    if (!t) { try { t = localStorage.getItem('mm.theme'); } catch (e) {} }
+    if (t !== 'dark' && t !== 'light') {
+      t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)
+        ? 'light' : 'dark';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', t === 'light' ? '#ffffff' : '#000000');
+  })();
+</script>
+<link rel="stylesheet" href="style.css?v=202610241623">
+</head>
+<body>
+
+<main class="stage">
+  <header class="head">
+    <h1>Matrix Music</h1>
+    <p class="sub">点亮格子，它就一圈一圈地循环演奏</p>
+  </header>
+
+  <div class="board-box">
+    <!-- 播放位置标尺：点 / 拖它就能把游标挪到任意一列（宽度和棋盘一致） -->
+    <div class="ruler" id="ruler" role="slider" tabindex="0"
+         aria-label="播放位置" aria-valuemin="0" aria-valuemax="15" aria-valuenow="0"
+         title="点或拖动这里移动播放游标">
+      <div class="ruler-band" id="ruler-band"></div>
+      <div class="ruler-dim ruler-dim-l" id="ruler-dim-l"></div>
+      <div class="ruler-dim ruler-dim-r" id="ruler-dim-r"></div>
+      <div class="ruler-edge ruler-edge-in" id="ruler-in" title="入点（I）" role="slider" tabindex="0" aria-label="回环入点"></div>
+      <div class="ruler-edge ruler-edge-out" id="ruler-out-edge" title="出点（O）" role="slider" tabindex="0" aria-label="回环出点"></div>
+      <div class="ruler-cursor" id="ruler-cursor"></div>
+    </div>
+
+    <div class="canvas-wrap">
+      <canvas id="matrix" width="512" height="512" aria-label="16 × 16 音符矩阵"></canvas>
+    </div>
+  </div>
+
+  <div class="controls">
+    <!-- 第一行：动作 + 显示开关（用竖线分组） -->
+    <div class="ctl-row ctl-actions">
+      <button id="btn-toggle" class="btn primary">播放</button>
+      <button id="btn-clear" class="btn">清空</button>
+      <span class="ctl-sep" aria-hidden="true"></span>
+      <button id="btn-glow" class="btn toggle" aria-pressed="true">微光</button>
+      <button id="btn-playhead" class="btn toggle" aria-pressed="true">播放列</button>
+      <span class="ctl-sep" aria-hidden="true"></span>
+      <button id="btn-share" class="btn" aria-expanded="false" aria-controls="share-row">谱子</button>
+    </div>
+
+    <!-- 第二行：参数。两行对齐成一列：标签 / 滑块 / 数值 -->
+    <div class="ctl-row ctl-fields">
+      <label class="f-label" for="tempo">速度</label>
+      <input id="tempo" class="f-range" type="range" min="40" max="240" step="1" value="120">
+      <output id="tempo-out" class="f-value" for="tempo">120 BPM</output>
+
+      <label class="f-label" for="volume">音量</label>
+      <input id="volume" class="f-range" type="range" min="0" max="100" step="1" value="85">
+      <output id="volume-out" class="f-value" for="volume">85%</output>
+    </div>
+
+    <!-- 乐谱的导出 / 载入面板。默认收起，点「谱子」展开。 -->
+    <div class="ctl-row ctl-share" id="share-row" hidden>
+      <textarea id="share-code" class="share-code" rows="2" spellcheck="false"
+                autocomplete="off" aria-label="乐谱代码"></textarea>
+      <div class="share-acts">
+        <button id="btn-share-copy" class="btn">复制</button>
+        <button id="btn-share-load" class="btn">载入</button>
+      </div>
+      <p id="share-status" class="share-status" role="status"></p>
+    </div>
+  </div>
+
+  <footer class="foot">
+    <p><strong>点击 / 拖动</strong> 开关方格　·　<strong>右键</strong> 试听　·　<strong>空格</strong> 播放 / 暂停　·　<strong>⌘Z</strong> 撤销</p>
+    <p class="meta"><strong>Alt + 拖动</strong> 框选　·　选中后：<strong>左键拖</strong> 搬走　·　<strong>A</strong> 填满　·　<strong>X</strong> 清空　·　<strong>Esc</strong> 取消　·　<strong>I</strong> / <strong>O</strong> 在游标处设入点 / 出点</p>
+    <p class="switch">改动会自动存在本机浏览器里　·　<a href="large.html">试试大面板：48 音 × 横向无限 →</a></p>
+    <!-- <p class="meta">16×16 五声音阶音序器　·　音阶 D 大调五声（A–B–D–E–F#，A3 → A6）　·　正弦 + 二次衰减包络 + 3 步反馈延迟</p> -->
+  </footer>
+</main>
+
+<script src="src/constants.js?v=202610241623"></script>
+<script src="src/theme.js?v=202610241623"></script>
+<script src="src/grid.js?v=202610241623"></script>
+<script src="src/audio.js?v=202610241623"></script>
+<script src="src/sequencer.js?v=202610241623"></script>
+<script src="src/renderer.js?v=202610241623"></script>
+<script src="src/storage.js?v=202610241623"></script>
+<script src="src/presets.js?v=202610241623"></script>
+<script src="src/app.js?v=202610241623"></script>
+</body>
+</html>

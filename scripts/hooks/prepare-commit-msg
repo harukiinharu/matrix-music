@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#
+# prepare-commit-msg —— 自动给提交信息补上 AI 协作者
+#
+# 装法（仓库已设好 core.hooksPath，克隆后重设一次即可）：
+#   git config core.hooksPath scripts/hooks
+#
+# 为什么用 prepare-commit-msg 而不是 commit-msg：
+#   prepare 在「信息成形后、写入前」执行，对 -m / -F / 编辑器三种写法都生效，
+#   而且不会改变退出码语义 —— 它做的是补全，不是校验，不该拦提交。
+#
+# 幂等：已经有同一行就不再追加。所以 `commit --amend`、rebase 里的
+# `--exec 'git commit --amend --no-edit'` 反复跑也不会叠出第二条。
+
+set -u
+
+MSG_FILE="${1:-}"
+[ -n "$MSG_FILE" ] || exit 0
+[ -f "$MSG_FILE" ] || exit 0
+
+TRAILER="Co-authored-by: WorkBuddy <noreply@workbuddy.cn>"
+
+# 已经有了（大小写不敏感）就什么都不做
+if grep -qi '^co-authored-by: *workbuddy' "$MSG_FILE"; then
+  exit 0
+fi
+
+# 空信息（比如 rebase 途中的空 amend）不碰，免得凭空造出一个只有 trailer 的提交
+if ! grep -q '[^[:space:]]' "$MSG_FILE"; then
+  exit 0
+fi
+
+# 去掉尾部空行，再补「一个空行 + trailer」，避免出现连续两个空行
+TMP="$(mktemp "${TMPDIR:-/tmp}/mm-msg-XXXXXX")"
+awk 'NF { last = NR } { line[NR] = $0 } END { for (i = 1; i <= last; i++) print line[i] }' \
+  "$MSG_FILE" > "$TMP" || { rm -f "$TMP"; exit 0; }
+
+printf '\n%s\n' "$TRAILER" >> "$TMP"
+cat "$TMP" > "$MSG_FILE"
+rm -f "$TMP"
+
+exit 0
