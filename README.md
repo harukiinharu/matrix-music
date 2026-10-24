@@ -196,7 +196,8 @@ D 大调五声音阶。因为只用五个音，所以**随手乱点也不会难�
 
 ## 本地运行
 
-把仓库下载下来，双击 `index.html`（或 `large.html`）就能玩，仅此而已。
+把仓库下载下来，双击 `dist/index.html`（或 `dist/large.html`）就能玩，仅此而已。
+站点全部在 `dist/` 里：两个 HTML、一个 CSS、`dist/js/*.js` —— 没有构建步骤。
 
 跑回归：
 
