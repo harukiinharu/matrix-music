@@ -1061,6 +1061,107 @@ async function run(win, doc) {
         dbg.grid.count() === beforeKeys && !!dbg.renderer.selection,
         'count = ' + dbg.grid.count());
 
+  // ── 复制 / 剪切 / 粘贴 ─────────────────────────────────
+  // 剪贴板是**页面内存**里的一块（不走系统剪贴板 —— `file://` 下 readText 拿不到，
+  // Chrome 还会弹权限），所以断言只能看行为：抄一份、贴到别处，图案该一模一样。
+  function cmd(k) { pressKey(k, { meta: true }); }
+
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  cmd('v');
+  check('剪贴板空着时 ⌘V 什么都不做', dbg.grid.count() === 0,
+        'count = ' + dbg.grid.count());
+
+  // 一个「只有四角」的 3×3 块 —— 中空是为了验证粘贴是**覆盖**而不是合并
+  dbg.grid.set(2, 2, true); dbg.grid.set(4, 2, true);
+  dbg.grid.set(2, 4, true); dbg.grid.set(4, 4, true);
+  altDrag(2, 2, 4, 4, 101);
+  cmd('c');
+  check('⌘C 复制不改动图案', dbg.grid.count() === 4, 'count = ' + dbg.grid.count());
+
+  // 复制是「看不见的动作」，必须有反馈，否则用户不知道到底抄到没有
+  var toast = doc.querySelector('.hint');
+  check('复制后有一闪而过的提示（3 × 3）',
+        !!toast && /3 × 3/.test(toast.textContent) && toast.classList.contains('show'),
+        toast ? toast.textContent : '无提示');
+
+  // 目标区先铺满 3×3，再整块盖上去：中空那几格应该被**清掉**
+  for (var pc = 8; pc <= 10; pc++) {
+    for (var pr = 8; pr <= 10; pr++) dbg.grid.set(pc, pr, true);
+  }
+  altDrag(8, 8, 10, 10, 102);
+  cmd('v');
+  check('⌘V 把块贴到选区左上角',
+        dbg.grid.get(8, 8) && dbg.grid.get(10, 8) &&
+        dbg.grid.get(8, 10) && dbg.grid.get(10, 10),
+        'count = ' + dbg.grid.count());
+  check('粘贴是覆盖而不是合并（中空的三格被清掉）',
+        !dbg.grid.get(9, 8) && !dbg.grid.get(9, 9) && !dbg.grid.get(9, 10),
+        'cell(9,9) = ' + dbg.grid.get(9, 9));
+  check('粘贴后音符数 = 原来的 4 + 贴上的 4', dbg.grid.count() === 8,
+        'count = ' + dbg.grid.count());
+  check('选区跟着贴上去的那一块（能按住直接拖走）',
+        dbg.renderer.selection.col0 === 8 && dbg.renderer.selection.row0 === 8 &&
+        dbg.renderer.selection.col1 === 10 && dbg.renderer.selection.row1 === 10,
+        JSON.stringify(dbg.renderer.selection));
+
+  pressKey('z', { meta: true });
+  check('整次粘贴只占一步撤销',
+        dbg.grid.count() === 13 && dbg.grid.get(9, 9) === true,
+        'count = ' + dbg.grid.count());
+  pressKey('z', { meta: true, shift: true });       // 回到粘贴之后
+  check('反撤销回到粘贴结果', dbg.grid.count() === 8 && !dbg.grid.get(9, 9),
+        'count = ' + dbg.grid.count());
+
+  // 「⌘C 顺手 ⌘V」贴的还是原来那几格：没有改动，就不该白吃掉一步撤销
+  cmd('c');
+  cmd('v');
+  pressKey('z', { meta: true });
+  check('原地贴出一样的内容不占撤销（⌘Z 退的是上一步粘贴）',
+        dbg.grid.count() === 13 && dbg.grid.get(9, 9) === true,
+        'count = ' + dbg.grid.count());
+  pressKey('z', { meta: true, shift: true });
+
+  // ⌘X = 复制 + 清空选区
+  altDrag(2, 2, 4, 4, 103);
+  cmd('x');
+  check('⌘X 剪切会清空选区', dbg.grid.count() === 4 && !dbg.grid.get(2, 2),
+        'count = ' + dbg.grid.count());
+  check('剪切后选区还在（可以立刻换地方贴）', !!dbg.renderer.selection);
+  cmd('v');
+  check('剪切后原地 ⌘V 能原样还原',
+        dbg.grid.count() === 8 && dbg.grid.get(2, 2) && dbg.grid.get(4, 4) &&
+        !dbg.grid.get(3, 3),
+        'count = ' + dbg.grid.count());
+
+  // 没有选区时：贴回复制时的位置（所以「剪切 → Esc → ⌘V」能放回去）
+  cmd('x');
+  key('Escape');
+  check('准备：剪切完再取消选区',
+        dbg.grid.count() === 4 && dbg.renderer.selection === null,
+        'count = ' + dbg.grid.count());
+  cmd('v');
+  check('没有选区时 ⌘V 贴回复制时的位置',
+        dbg.grid.count() === 8 && dbg.grid.get(2, 2) && dbg.grid.get(4, 4),
+        'count = ' + dbg.grid.count());
+
+  // 贴到右下角：整块夹进棋盘，而不是裁掉溢出的两行两列
+  altDrag(15, 15, 15, 15, 104);
+  cmd('v');
+  check('贴到边缘时整块夹进棋盘（不丢音）',
+        dbg.grid.get(13, 13) && dbg.grid.get(15, 13) &&
+        dbg.grid.get(13, 15) && dbg.grid.get(15, 15),
+        'count = ' + dbg.grid.count());
+
+  // 焦点在「谱子」输入框里：⌘C / ⌘X / ⌘V 归浏览器，不动棋盘
+  var keepPaste = dbg.grid.count();
+  shareCode.dispatchEvent(new win.KeyboardEvent('keydown',
+    { key: 'v', metaKey: true, bubbles: true, cancelable: true }));
+  shareCode.dispatchEvent(new win.KeyboardEvent('keydown',
+    { key: 'x', metaKey: true, bubbles: true, cancelable: true }));
+  check('焦点在输入框时 ⌘V / ⌘X 不动棋盘', dbg.grid.count() === keepPaste,
+        'count = ' + dbg.grid.count());
+
   report();
 }
 </script>

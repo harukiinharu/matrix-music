@@ -804,6 +804,33 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     check('大面板：点画布外的留白会取消选择', R3.selection === null,
           JSON.stringify(R3.selection));
 
+    // ── 复制 / 粘贴：矩形网格上的 stride ───────────────────
+    // 剪贴板内部按**块自己的行数**编排，棋盘按 48 行 —— 两处混用会整片串位，
+    // 正方形面板上恰好看不出（16 == 16），只有这里抓得到。
+    dbg.grid.clear();
+    dbg.grid.set(selBase + 2, 40, true);
+    dbg.grid.set(selBase + 4, 42, true);
+    dbg.grid.set(selBase + 3, 44, true);
+    altDragCell(selBase + 2, 40, selBase + 4, 44, 91);
+
+    function cmdKey(k) {
+      win.dispatchEvent(new win.KeyboardEvent('keydown',
+        { key: k, metaKey: true, bubbles: true, cancelable: true }));
+    }
+    var beforeCopy = dbg.grid.count();
+    cmdKey('c');
+    check('大面板：⌘C 只抄不改（图案原样）', dbg.grid.count() === beforeCopy,
+          'count = ' + dbg.grid.count());
+
+    altDragCell(selBase + 10, 10, selBase + 10, 10, 92);   // 1×1 目标，粘贴锚点
+    cmdKey('v');
+    check('大面板：粘贴按行列各归各位（行不串位）',
+          dbg.grid.get(selBase + 10, 10) && dbg.grid.get(selBase + 12, 12) &&
+          dbg.grid.get(selBase + 11, 14),
+          '锚点 (' + (selBase + 10) + ',10)');
+    check('大面板：粘贴没多出额外的音（3 抄 + 3 贴）',
+          dbg.grid.count() === 6, 'count = ' + dbg.grid.count());
+
     // ── 合成一帧，确认渲染链路跑得动 ───────────────────────
     // 采样前关掉微光和播放列：两者都是合成层叠加，会把格子颜色改掉
     R3.setGlowEnabled(false);

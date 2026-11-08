@@ -63,7 +63,7 @@ CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   --dump-dom "file://$PWD/test/selftest.html"
 ```
 
-结果在 `<pre id="results">` 里。**必须全部通过（当前 117 项），不允许出现 FAIL / JS ERROR / WATCHDOG。**
+结果在 `<pre id="results">` 里。**必须全部通过（当前 145 项），不允许出现 FAIL / JS ERROR / WATCHDOG。**
 
 页面级交互回归（文案 / 空格键 / 微光开关 / 点按涂抹）：
 
@@ -74,7 +74,7 @@ CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   --dump-dom "file://$PWD/test/interaction.html"
 ```
 
-结果在 `<pre id="out">` 里（当前 110 项）。这个测试靠 iframe 加载 `index.html?debug=1`，
+结果在 `<pre id="out">` 里（当前 167 项）。这个测试靠 iframe 加载 `index.html?debug=1`，
 断言建立在模型状态上，**不要改成采样渲染后的像素**（原因见 §10）。
 
 大面板回归（32 行 × 64 列，即 `large.html` 那条入口）：
@@ -86,9 +86,9 @@ CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   --dump-dom "file://$PWD/test/large.html"
 ```
 
-结果在 `<pre id="out">` 里（当前 93 项）。它盯的是**矩形网格相对正方形多出来的
+结果在 `<pre id="out">` 里（当前 119 项）。它盯的是**矩形网格相对正方形多出来的
 失败模式**：一维数组拿错 stride、音序器 `% GRID` 提前归零、行扫描写死 16 行、
-命中测试写死 `CFG.GRID`、微光场维度接反。每一条都做过变异验证（见 §10）。
+命中测试写死 `CFG.GRID`、微光场维度接反、剪贴板跨 stride 串位。每一条都做过变异验证（见 §10）。
 
 视觉回归（渲染是否被改坏）：
 
@@ -120,8 +120,8 @@ test/                  回归页（不进产物，只在本地 / CI 跑）
 scripts/               ci-test.sh（页面级回归）、bump.sh（资源缓存戳）
 dist/js/app.js            装配、输入、主循环（固定步长）。两套入口共用这一份
 test/selftest.html    145 项断言（离线音频渲染、微光衰减、描边不变式、乐谱编解码、暂停续播）
-test/interaction.html 158 项页面级交互断言（iframe + ?debug=1）
-test/large.html       95 项大面板断言（矩形网格 stride / 视口平移与命中 / 微光维度）
+test/interaction.html 167 项页面级交互断言（iframe + ?debug=1）
+test/large.html       119 项大面板断言（矩形网格 stride / 视口平移与命中 / 微光维度）
 test/sharp.html       格子边缘锐度探针（读图层像素）
 test/perf.html        渲染开销探针（?cell=&glow=&gblur= 可切配置做 A/B）
 test/visual.html      渲染回归 + 亮度量化
@@ -344,6 +344,9 @@ test/diag.html        频率/节点诊断
 | **⌘/Ctrl + ⇧ + Z**（或 `Ctrl+Y`） | 反撤销 |
 | **Alt + 左键拖动** | 拉框选择一块矩形 |
 | **选区内按住左键拖** | 整块搬走（夹在棋盘内，拖不出去） |
+| **⌘/Ctrl + C** | 复制选区（抄进**页面内存**的剪贴板，见 §8-9） |
+| **⌘/Ctrl + X** | 剪切选区 = 复制 + 清空 |
+| **⌘/Ctrl + V** | 粘贴到**选区左上角**；没有选区就贴回复制时的位置 |
 | **A** / **X** | 把选区填满 / 清空 |
 | **Esc** | 取消选择（点选区外也一样） |
 
@@ -368,6 +371,25 @@ test/diag.html        频率/节点诊断
     基准版只有黑白灰，不留个颜色的话「选中区域」和「亮着的格子」分不出来
     （尤其选了一片全是亮格的区域）。它是**交互状态**，画在合成层最上层
     （辉光之上，`_drawSelection`），**不碰格子图层**。
+
+- **复制 / 剪切 / 粘贴（⌘C / ⌘X / ⌘V）**：剪贴板是 `app.js` 里的一块**页面内存**
+  （`clip = {cols, rows, cells, col, row}`），不是系统剪贴板（理由见 §8-9）。四条口径：
+  1. **粘贴是「盖章」**：目标矩形按剪贴板内容整个覆盖（**含空格子**），不是合并 ——
+     否则「剪切 → 粘贴」还原不出一模一样的图案。`test/interaction.html` 拿一块
+     「只有四角」的 3×3 盖在铺满的目标上，断言中空那几格被清掉。
+  2. **stride 分两套**：剪贴板内部按 `clip.rows` 编排，写回棋盘按 `grid.rows`。
+     矩形面板上混用会整片串位，正方形面板（16 == 16）恰好看不出来 ——
+     `test/large.html` 专门守这条。
+  3. **整块夹在棋盘内**，不裁掉溢出部分（与 `applyMove()` 同口径）：贴到边缘时
+     宁可挪一下起点，也别悄悄丢音。
+  4. **一次粘贴 = 一步撤销**（贴出来和现状一样时不占步骤 —— 「⌘C 顺手 ⌘V」不该
+     白吃掉一步）；贴完选区落到刚贴上去的那块（能按住直接拖走）。
+     没有选区时贴回复制时的列 / 行，所以「⌘X → Esc → ⌘V」能原样放回去。
+     同理，剪一块**空的**区域只算复制，不占撤销。
+- **复制必须有反馈**：`hint()` 在页面底部弹一条 1.1 秒的反色胶囊（`.hint`，
+  `pointer-events: none`）。复制是「看不见的动作」，不吭声的话用户没法确认 ⌘C 生效没有。
+- **⌘C / ⌘X / ⌘V 在 `input` / `textarea` 里要放行**（同上面的 ⌘Z）；没选区（复制 /
+  剪切）或剪贴板空着（粘贴）时也**不** `preventDefault` —— 别白拦一次浏览器原生行为。
 
 - **撤销的粒度是「一次操作」，不是「一格」。** 快照在**操作开始时**拍
   （画布 `pointerdown` / 清空 / 载入），所以按住拖过一整条只占一步。
@@ -460,6 +482,12 @@ test/diag.html        频率/节点诊断
 7. **微光可开关**（`#btn-glow`）。低性能设备上关掉它是最有效的提速手段。
 8. **右键试听**。右键某一格会单独播一次该格的音（走同一条发声链路），
    并在该格套一圈描边提示「按的是这一格」；**不动图案，也不改格子填充色**。
+9. **选区的剪贴板放在页面内存里，不走系统剪贴板。** `navigator.clipboard.readText()`
+   在 Chrome 上会弹「允许查看剪贴板？」、在 `file://` 下又多半直接不可用 ——
+   而这个页面双击就能开、连 `npm install` 都不需要，不该为了搬几格音符去要剪贴板权限。
+   代价：**跨页面**搬（16×16 ↔ 大面板）用不了 ⌘C / ⌘V，那是「谱子」面板的活（MM3，见 §13）。
+   将来真要支持跨页面搬块，走「块级代码（音高式编码，参照 MM3）+ 一次明确的权限提示」，
+   别在后台静默读剪贴板。
 
 ## 9. 提交约定
 

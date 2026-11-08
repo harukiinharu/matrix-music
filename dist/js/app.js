@@ -457,6 +457,30 @@
       }
     });
 
+    // ⌘/Ctrl + C / X / V：复制 / 剪切 / 粘贴选区。
+    // 焦点在输入框里时**放行** —— 那是文本复制粘贴，别去动棋盘。
+    // 没选区（复制 / 剪切）或剪贴板空着（粘贴）时也不拦：别让浏览器白丢一次原生行为。
+    global.addEventListener('keydown', function (e) {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      var t = e.target;
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+
+      var k = (e.key || '').toLowerCase();
+      if (k === 'c') {
+        if (!renderer.selection) return;
+        e.preventDefault();
+        if (copySelection()) hint('已复制 ' + clipSizeText());
+      } else if (k === 'x') {
+        if (!renderer.selection) return;
+        e.preventDefault();
+        if (cutSelection()) hint('已剪切 ' + clipSizeText());
+      } else if (k === 'v') {
+        if (!clip) return;
+        e.preventDefault();
+        if (pasteClipboard()) hint('已粘贴 ' + clipSizeText());
+      }
+    });
+
     // 布局变化后缓存的矩形会失效
     global.addEventListener('resize', function () { rect = null; });
     global.addEventListener('scroll', function () { rect = null; }, true);
@@ -563,6 +587,114 @@
       for (var r = s.row0; r <= s.row1; r++) next[c * grid.rows + r] = value;
     }
     grid.replaceAll(next);
+  }
+
+  // ── 选区的复制 / 剪切 / 粘贴 ────────────────────────────
+  //
+  // 剪贴板是**本页内存**里的一块，不走系统剪贴板。理由：`navigator.clipboard.readText()`
+  // 在 Chrome 上会弹「允许查看剪贴板？」、在 `file://` 下又多半直接不可用 ——
+  // 而这个页面双击就能开、连 npm 都不需要，不该为了搬几格音符去要剪贴板权限。
+  // 代价：跨页面搬（16×16 ↔ 大面板）用不了它，那是「谱子」面板的活（MM3，见 §13）。
+  //
+  // 粘贴是**盖章**语义：目标区域按剪贴板内容整个覆盖（含空格子），不是合并 ——
+  // 否则「剪切 + 粘贴」还原不出一模一样的图案。
+  var clip = null;        // { cols, rows, cells, col, row }，col/row 是复制时的左上角
+
+  /** 把当前选区抄进剪贴板。返回是否真的抄了（没选区就是没抄） */
+  function copySelection() {
+    var s = renderer.selection;
+    if (!s) return false;
+
+    var w = s.col1 - s.col0 + 1;
+    var h = s.row1 - s.row0 + 1;
+    var cells = new Uint8Array(w * h);
+    for (var c = 0; c < w; c++) {
+      for (var r = 0; r < h; r++) {
+        if (grid.get(s.col0 + c, s.row0 + r)) cells[c * h + r] = 1;
+      }
+    }
+    clip = { cols: w, rows: h, cells: cells, col: s.col0, row: s.row0 };
+    return true;
+  }
+
+  /** 剪切 = 抄一份 + 清空选区（清空只占一步撤销） */
+  function cutSelection() {
+    if (!copySelection()) return false;
+    // 块里本来就没有音符：「剪切」和「复制」是同一件事，别白占一步撤销
+    // （与「空谱子上点清空不占步骤」同口径）
+    for (var i = 0; i < clip.cells.length; i++) {
+      if (clip.cells[i]) { setSelectionCells(0); break; }
+    }
+    return true;
+  }
+
+  /**
+   * 把剪贴板贴到**选区左上角**；没有选区就贴回复制时的列、原来的行
+   * （于是「剪切 → Esc → ⌘V」能原样放回去）。
+   *
+   * 整块夹在棋盘内，而不是裁掉溢出部分 —— 贴到边缘时宁可挪一下起点，
+   * 也别悄悄丢音（与 `applyMove()` 的夹法一致）。
+   */
+  function pasteClipboard() {
+    if (!clip) return false;
+
+    var s = renderer.selection;
+    var col0 = s ? s.col0 : clip.col;
+    var row0 = s ? s.row0 : clip.row;
+    if (col0 + clip.cols > grid.cols) col0 = grid.cols - clip.cols;
+    if (row0 + clip.rows > grid.rows) row0 = grid.rows - clip.rows;
+    if (col0 < 0) col0 = 0;
+    if (row0 < 0) row0 = 0;
+
+    var next = grid.cells.slice();
+    for (var c = 0; c < clip.cols; c++) {
+      for (var r = 0; r < clip.rows; r++) {
+        // 注意 stride：剪贴板内部按「自己的行数」编排，棋盘按 grid.rows ——
+        // 两个行数不一样时混用会整片串位（矩形面板上必翻车）。
+        next[(col0 + c) * grid.rows + (row0 + r)] = clip.cells[c * clip.rows + r];
+      }
+    }
+
+    // 贴出来的结果和现在一模一样就不占撤销 —— 否则「⌘C 顺手 ⌘V」会白吃掉一步。
+    var same = true;
+    for (var i = 0; i < next.length; i++) {
+      if (next[i] !== grid.cells[i]) { same = false; break; }
+    }
+    if (same) return true;
+
+    pushHistory();
+    grid.replaceAll(next);
+
+    // 贴完把选区落到刚贴上去的那一块：能按住直接拖走，也能原地再 ⌘V
+    setSelection({ col: col0, row: row0 },
+                { col: col0 + clip.cols - 1, row: row0 + clip.rows - 1 });
+    return true;
+  }
+
+  function clipSizeText() {
+    return clip.cols + ' × ' + clip.rows;
+  }
+
+  // ── 一闪而过的提示 ──────────────────────────────────────
+  //
+  // 复制 / 粘贴是「看不见的动作」：不做声的话，用户没法确认 ⌘C 到底有没有抄到。
+  // 用一条浮在底部的胶囊，`pointer-events: none` 所以不会挡住棋盘。
+  var hintEl = null, hintTimer = null;
+
+  function hint(msg) {
+    if (!hintEl) {
+      hintEl = document.createElement('div');
+      hintEl.className = 'hint';
+      hintEl.setAttribute('role', 'status');    // 屏幕阅读器也念一遍
+      document.body.appendChild(hintEl);
+    }
+    hintEl.textContent = msg;
+    hintEl.classList.add('show');
+    if (hintTimer) clearTimeout(hintTimer);
+    hintTimer = setTimeout(function () {
+      hintTimer = null;
+      hintEl.classList.remove('show');
+    }, 1100);
   }
 
   // 命中测试按画布上的归一化坐标缩放。**必须**取 grid.cols / grid.rows，
