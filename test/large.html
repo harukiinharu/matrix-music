@@ -683,7 +683,7 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
           '（视口 ' + R3.viewCol0 + '..' + (R3.viewCol0 + R3.viewCols - 1) + '）');
 
     // ── 命中测试：坐标要跟着视口走 ─────────────────────────
-    /** 在某一格完整点一下（按下 + 抬起）—— 落笔发生在抬起 */
+    /** 在某一格完整点一下（按下 + 抬起）—— 左键按下就落笔，抬起只负责收尾 */
     function tapCell(col, row, pointerId) {
       var ev = {
         clientX: xOf(col), clientY: yOf(row),
@@ -779,17 +779,30 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     }));
     await wait(80);
 
+    /** 右键从一格拖到另一格 —— 选区只归右键，左键拖动是画笔 */
     function boxDragCell(c0, r0, c1, r1, pointerId) {
       canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
-        clientX: xOf(c0), clientY: yOf(r0),
+        clientX: xOf(c0), clientY: yOf(r0), button: 2, buttons: 2,
         bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
       }));
       canvas.dispatchEvent(new win.PointerEvent('pointermove', {
-        clientX: xOf(c1), clientY: yOf(r1),
+        clientX: xOf(c1), clientY: yOf(r1), button: 2, buttons: 2,
         bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
       }));
       canvas.dispatchEvent(new win.PointerEvent('pointerup', {
-        clientX: xOf(c1), clientY: yOf(r1),
+        clientX: xOf(c1), clientY: yOf(r1), button: 2,
+        bubbles: true, pointerId: pointerId, isPrimary: true
+      }));
+    }
+
+    /** 右键单击一格 = 1×1 选区 */
+    function rightClickCell(col, row, pointerId) {
+      canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+        clientX: xOf(col), clientY: yOf(row), button: 2, buttons: 2,
+        bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
+      }));
+      canvas.dispatchEvent(new win.PointerEvent('pointerup', {
+        clientX: xOf(col), clientY: yOf(row), button: 2,
         bubbles: true, pointerId: pointerId, isPrimary: true
       }));
     }
@@ -827,9 +840,9 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     check('大面板：⌘C 只抄不改（图案原样）', dbg.grid.count() === beforeCopy,
           'count = ' + dbg.grid.count());
 
-    // 目标位置：单击落笔，再单击它 = 单独选中这一格（1×1 粘贴锚点）
-    tapCell(selBase + 10, 10, 92);
-    tapCell(selBase + 10, 10, 93);
+    // 目标位置：右键单击 = 选中这一格（1×1 粘贴锚点）。
+    // 左键单击不行 —— 它只是把那一格开 / 关，不产生选区。
+    rightClickCell(selBase + 10, 10, 92);
     cmdKey('v');
     check('大面板：粘贴按行列各归各位（行不串位）',
           dbg.grid.get(selBase + 10, 10) && dbg.grid.get(selBase + 12, 12) &&
@@ -876,6 +889,33 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     check('大面板：Alt + 拖动整次复制一步撤销（回到 3 个音）',
           dbg.grid.count() === 3 && !dbg.grid.get(selBase + 8, 30),
           'count = ' + dbg.grid.count());
+
+    // ── 左键拖动 = 画笔：矩形网格上补格不能串行 ────────────
+    // paintLine 按「列跨度和行跨度里大的那个」插值，写回时用的是 grid.rows（48），
+    // 不是 16。拿错 stride 的话这一条线会斜到别的行上去 —— 正方形面板看不出来。
+    dbg.grid.clear();
+    var selBeforePaint = JSON.stringify(R3.selection);
+    var pr = 20, pc = selBase + 2;
+    canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+      clientX: xOf(pc), clientY: yOf(pr),
+      bubbles: true, cancelable: true, pointerId: 111, isPrimary: true
+    }));
+    canvas.dispatchEvent(new win.PointerEvent('pointermove', {
+      clientX: xOf(pc + 9), clientY: yOf(pr),   // 一步跨 9 列
+      bubbles: true, cancelable: true, pointerId: 111, isPrimary: true
+    }));
+    canvas.dispatchEvent(new win.PointerEvent('pointerup', {
+      clientX: xOf(pc + 9), clientY: yOf(pr),
+      bubbles: true, pointerId: 111, isPrimary: true
+    }));
+    var rowOk = true;
+    for (var px = 0; px <= 9; px++) if (!dbg.grid.get(pc + px, pr)) rowOk = false;
+    check('大面板：左键一步跨 9 列画满一整条（没串行）',
+          rowOk && dbg.grid.count() === 10,
+          'count = ' + dbg.grid.count());
+    check('大面板：画笔不动选区（画笔没有副作用）',
+          JSON.stringify(R3.selection) === selBeforePaint,
+          selBeforePaint + ' → ' + JSON.stringify(R3.selection));
 
     // ── 合成一帧，确认渲染链路跑得动 ───────────────────────
     // 采样前关掉微光和播放列：两者都是合成层叠加，会把格子颜色改掉

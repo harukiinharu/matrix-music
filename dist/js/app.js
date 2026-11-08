@@ -277,9 +277,12 @@
   /**
    * 涂抹 / 框选拖到视口边缘时继续平移 —— 无限画布的关键手感：
    * 不用松手、不用滚轮，一直往右拖就一直画。
+   *
+   * 判据是「有没有按住」（`press`），不是 `dragMode`：画笔在按下那一刻就落笔了，
+   * 根本不进 `dragMode`，但它同样需要贴着边缘继续画。
    */
   function autoPanAtEdge(e) {
-    if (!RUNTIME.scrollX || !dragMode) return;
+    if (!RUNTIME.scrollX || !press) return;
     var r = canvas.getBoundingClientRect();
     var edge = Math.max(24, renderer.cell * 1.2);
     if (e.clientX > r.right - edge) panByCols(1);
@@ -289,20 +292,21 @@
   // ── 交互 ────────────────────────────────────────────────
   //
   // 落笔与音频启动解耦：格子的增删不等 AudioContext 就绪。
-  // 但**落笔要等松手** —— 按下那一刻还分不清用户想点一下还是想拉框（见下）。
+  //
+  // **左键 = 画笔，右键 = 选择。** 一个键只做一件事：
+  // 左键管音符（点开、点关、按住拖画一整条 / 按住拖擦一整条），
+  // 右键管选区（单击选一格、拖动框一片）。两条路互不干扰，
+  // 所以不像上一版那样需要靠「按下 / 松手」去猜意图 ——
+  // 左键按下就能落笔，画一笔的手感是立刻的。
   function bindInput() {
     var rect = null;          // 缓存的画布矩形，避免每次 pointermove 都触发重排
     // 拖动状态（press / dragMode / move*）声明在模块级 —— 见文件下方「指针意图」
     // 那段注释：applyMove() 定义在 bindInput 外面，声明在这里它就看不见了。
 
-    // 左键是**一个**手势，却要表达两件事：单击 = 选中并试听（空格子则是落笔），
-    // 拖动 = 框选。按下那一刻还分不出是哪一种，所以只记下起点，等指针动没动。
-    //
-    // 判据是「有没有离开起点格」，不是像素距离：抖一下没跨格就还算单击，
-    // 正好和「格子」这个操作单位对齐。离开后又拖回起点格，等于什么也没框住，
-    // 松手时仍按单击处理 —— 否则「手抖出去又抖回来」会变成点了没反应。
     canvas.addEventListener('pointerdown', function (e) {
-      if (e.button !== 0) return;      // 右键不参与任何操作（见下方 contextmenu）
+      // 只认左键（0）和右键（2）。中键留给 bindPan 的抓手平移，
+      // 这里不 preventDefault 就是为了让它继续冒泡上去。
+      if (e.button !== 0 && e.button !== 2) return;
       e.preventDefault();
       rect = canvas.getBoundingClientRect();
       if (canvas.setPointerCapture) {
@@ -310,26 +314,40 @@
       }
       var cell = cellAt(e, rect);
       if (!cell) return;
+      boot();                          // 点击本身就是用户手势，顺手解锁音频
 
+      // ── 右键：只做选区 ──────────────────────────────────
+      if (e.button === 2) {
+        press = { cell: cell, mode: 'select', moved: false };
+        setSelection(cell, cell);      // 单击 = 选中这一格；拖出去再扩成一片
+        return;
+      }
+
+      // ── 左键：画笔 ──────────────────────────────────────
+      //
+      // 按在**已有选区里面**是唯一的例外：那是「整块搬走」的起手式
+      // （按住 Alt 则是复制一份、原件留在原地）。
+      // 代价是选区里画不了线 —— 想画先按 Esc 或点画布外把选区撤掉。
+      // 这条与图形软件「按住已选中的对象拖动」一致，也是上一版定下的规则。
       if (renderer.selection && inSelection(cell)) {
-        // 按在已有选区**里面** = 准备整块搬走；没拖起来就只是「听一下这一格」，
-        // 选区原样留着 —— 与图形软件里「按住已选中的对象拖动」同一条规则。
-        //
-        // 按住 Alt 则是**复制**那一块：原件留在原地，拖走的是副本。
-        // 与 Figma / Illustrator 的 Option+拖动同一条规则，所以不需要额外的
-        // 「复制模式」开关，也不必先 ⌘C 再 ⌘V。
-        //
-        // Alt 只在这个位置有意义：没有选区、或按在选区外时它照旧被忽略，
-        // 拖动仍是框选 —— 否则「按了 Alt 却什么也没发生」会让人以为卡了。
-        press = { cell: cell, mode: e.altKey ? 'dup' : 'move', moved: false };
+        press = { cell: cell, mode: 'block', moved: false, alt: !!e.altKey };
         moveBase = grid.cells.slice();
         moveFrom = cell;
         moveRect = renderer.selection;
         moveDc = 0; moveDr = 0;
-      } else {
-        press = { cell: cell, mode: 'click', moved: false };
+        return;
       }
-      boot();                          // 点击本身就是用户手势，顺手解锁音频
+
+      // 落笔值由**起手那一格**决定，整次拖动统一写这个值 ——
+      // 如果改成逐格 toggle，指针经过同一格两次会反复翻转，画出毛边。
+      //   起手是空格 → 画（值 1）
+      //   起手有音   → 擦（值 0）
+      press = { cell: cell, mode: 'paint', moved: false };
+      paintValue = grid.get(cell.col, cell.row) ? 0 : 1;
+      pushHistory();                   // 一次按下 = 一步撤销（整条一起退）
+      grid.set(cell.col, cell.row, paintValue);
+      if (paintValue) audition(cell);  // 点亮时响一声；擦掉不出声
+      lastCell = cell;
     });
 
     canvas.addEventListener('pointermove', function (e) {
@@ -338,27 +356,47 @@
       autoPanAtEdge(e);                // 拖到边缘继续平移（大面板）
 
       var cell = cellAt(e, rect);
+
+      if (press.mode === 'paint') {
+        // 快速拖动时浏览器会把多个移动合并成一个事件，
+        // getCoalescedEvents() 能取回中间点，避免漏格。
+        var pts = (e.getCoalescedEvents && e.getCoalescedEvents().length)
+          ? e.getCoalescedEvents() : [e];
+        for (var i = 0; i < pts.length; i++) {
+          var c = cellAt(pts[i], rect);
+          if (!c) continue;            // 拖出画布：跳过这一点，继续处理后面的
+          grid.paintLine(lastCell, c, paintValue);
+          lastCell = c;
+          press.moved = true;
+        }
+        return;
+      }
+
       if (!cell) return;
 
+      if (press.mode === 'select') {
+        press.moved = true;
+        setSelection(press.cell, cell);
+        return;
+      }
+
+      // block：搬走 / 复制。整次拖动 = 一步撤销，所以推迟到真的拖起来再拍快照。
       if (!press.moved) {
         if (cell.col === press.cell.col && cell.row === press.cell.row) return;
         press.moved = true;
-        dragMode = (press.mode === 'move') ? 'move'
-                 : (press.mode === 'dup')  ? 'dup'
-                 : 'select';
-        // 整次搬动 / 复制 = 一步撤销。按下时还不知道会不会拖起来，所以推迟到这里，
-        // 免得「在选区里点一下听听」也白占一步撤销。
-        if (dragMode !== 'select') pushHistory();
+        dragMode = press.alt ? 'dup' : 'move';
+        pushHistory();
       }
-
-      if (dragMode === 'move' || dragMode === 'dup') applyMove(cell, dragMode === 'dup');
-      else setSelection(press.cell, cell);
+      applyMove(cell, dragMode === 'dup');
     });
 
     /**
-     * 松手收尾，并判定这一次是「单击」还是「拖动」。
+     * 松手收尾。
      *
-     * 只有确定的单击才落笔 —— 框选绝不能顺手把起点那一格点亮或擦掉。
+     * 画笔的每一格在 pointerdown / pointermove 里就写完了，这里无事可做；
+     * 选区在 pointerdown / pointermove 里也实时铺好了。
+     * 只有一种情况要在这里补一刀：**在选区里按了一下但没拖动** ——
+     * 那既不是搬走，就该按普通的「单击 = 开 / 关」处理。
      *
      * @param {boolean} commit 指针在画布内抬起（true）还是取消 / 抬在画布外（false）
      */
@@ -367,26 +405,16 @@
       if (!p) return;
       press = null;
 
-      var s = renderer.selection;
-      // 真框出了一块（不止一格）才算框选；1×1 等于什么也没框住
-      var boxed = p.moved && s && (s.col1 > s.col0 || s.row1 > s.row0);
-
-      if (p.mode === 'move' || p.mode === 'dup') {
-        // 搬动已经在 pointermove 里实时算过；没挪动就只是试听这一格
-        // （按住 Alt 点一下也一样：先听，别顺手复制出一个跟原件重叠的副本）
-        if (commit && !p.moved && grid.get(p.cell.col, p.cell.row)) audition(p.cell);
-      } else if (commit && !boxed) {
-        if (grid.get(p.cell.col, p.cell.row)) {
-          setSelection(p.cell, p.cell);              // 单击已有的音 = 单独选中它
-        } else {
-          setSelection(null);                        // 点在选区外：旧选区就此撤掉
-          pushHistory();
-          grid.set(p.cell.col, p.cell.row, true);    // 单击空格 = 落一个音
-        }
-        audition(p.cell);                            // 两种都发一次声
+      if (p.mode === 'block' && commit && !p.moved) {
+        var on = grid.get(p.cell.col, p.cell.row);
+        pushHistory();
+        grid.set(p.cell.col, p.cell.row, !on);
+        if (!on) audition(p.cell);     // 点亮发声，关掉不发声
       }
 
       dragMode = null;
+      paintValue = null;
+      lastCell = null;
       moveBase = null;
       moveFrom = null;
       moveRect = null;
@@ -497,9 +525,8 @@
     global.addEventListener('resize', function () { rect = null; });
     global.addEventListener('scroll', function () { rect = null; }, true);
 
-    // 右键：这个页面**不给右键任何功能**。试听已经并入左键单击
-    // （见 finishPress），所以右键只剩下「别弹浏览器菜单」这一件事 ——
-    // canvas 上弹出的「存储图像」对一块实时绘制的画布毫无意义，只会打断操作。
+    // 右键已经用来框选了，它自带的那个菜单必须挡掉 ——
+    // canvas 上弹出的「存储图像」对一块实时绘制的画布毫无意义，只会打断拉框。
     // 挂在容器上而不是 canvas 上：落在棋盘周围的留白里也一并屏蔽。
     // 大面板（large.html）的容器是 .board-shell。
     var wrap = document.querySelector('.board-shell') ||
@@ -529,8 +556,11 @@
   // 若把它们声明在 `bindInput` 里，helper 里访问到的是未声明变量 ——
   // 在 'use strict' 下直接抛 ReferenceError，而事件处理里的异常会被吞掉，
   // 表现成「按下去什么也没发生」，极难查。踩过。
-  var press = null;           // 按下了但还没松手：{ cell, mode: 'click'|'move'|'dup', moved }
-  var dragMode = null;        // null | 'select'（框选）| 'move'（搬选区）| 'dup'（复制并拖走）
+  var press = null;           // 按下了但还没松手：{ cell, mode: 'paint'|'block'|'select', moved, alt }
+  var dragMode = null;        // 只有 block 模式会设：null | 'move'（搬选区）| 'dup'（复制并拖走）
+  // 画笔：本次拖动统一写入的值（1 = 画、0 = 擦），以及上一格（补格用）
+  var paintValue = null;
+  var lastCell = null;
   var moveBase = null;        // 搬动开始时整张谱子的副本（每次移动都从它重算）
   var moveFrom = null;        // 搬动起点格
   var moveRect = null;        // 搬动开始时选区的矩形
@@ -538,8 +568,9 @@
 
   // ── 框选 ────────────────────────────────────────────────
   //
-  // 选区就是一块矩形。左键拉框；框内按住左键整体搬走（按住 Alt 拖动 = 复制并拖走副本）；
-  // X 清空这一块、A 填满这一块、Esc 取消。
+  // 选区就是一块矩形，**只由右键产生**：右键单击选一格、右键拖动框一片。
+  // 框好了之后：框内按住左键拖 = 整块搬走（按 Alt = 复制一份）；
+  // X 清空这一块、A 填满这一块、⌘C / ⌘X / ⌘V 复制粘贴、Esc 取消。
   function setSelection(a, b) {
     if (!a) { renderer.selection = null; return; }
     renderer.selection = {

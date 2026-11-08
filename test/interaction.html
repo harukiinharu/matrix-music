@@ -540,7 +540,7 @@ async function run(win, doc) {
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);
   check('清空按钮仍然清空网格', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
 
-  // ── 单击 = 选中并试听；右键没有任何功能 ─────────────────
+  // ── 左键 = 画笔（点开 / 点关），右键 = 选区 ──────────────
   var played = [];
   var origSynth = dbg.audio.synthNote;
   dbg.audio.synthNote = function (note, when) {
@@ -555,10 +555,7 @@ async function run(win, doc) {
     };
   }
 
-  /**
-   * 完整点一下某一格：按下 + 抬起。
-   * 落笔发生在**抬起** —— 按下那一刻还分不清用户想点一下还是要拉框。
-   */
+  /** 完整点一下某一格：按下 + 抬起（左键按下就落笔，抬起只负责收尾） */
   function clickCell(col, row, id) {
     var p = at(col, row);
     var ev = {
@@ -570,16 +567,21 @@ async function run(win, doc) {
   }
 
   /**
-   * 模拟真实右键：浏览器会**先**派发 pointerdown(button=2)，
-   * 再派发 contextmenu。只派发 contextmenu 是测不出问题的
-   * （早期版本就是漏了这个才让右键把格子翻转了）。
+   * 模拟真实右键：浏览器会**先**派发 pointerdown(button=2)，再派发 contextmenu。
+   * 现在右键要用来框选，所以 press 状态必须靠 pointerup 收尾 ——
+   * 少发一个抬起，后面的拖动就会被当成「还在拉框」，一步错步步错。
    * @returns {Event} contextmenu 事件本身，用来断言它被 preventDefault 了
    */
-  function rightClick(col, row) {
+  function rightClick(col, row, id) {
     var p = at(col, row);
+    var pid = id || 9;
     canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
-      clientX: p.clientX, clientY: p.clientY,
-      bubbles: true, cancelable: true, pointerId: 9, isPrimary: true, button: 2, buttons: 2
+      clientX: p.clientX, clientY: p.clientY, button: 2, buttons: 2,
+      bubbles: true, cancelable: true, pointerId: pid, isPrimary: true
+    }));
+    canvas.dispatchEvent(new win.PointerEvent('pointerup', {
+      clientX: p.clientX, clientY: p.clientY, button: 2,
+      bubbles: true, pointerId: pid, isPrimary: true
     }));
     var ctx = new win.MouseEvent('contextmenu', {
       clientX: p.clientX, clientY: p.clientY, bubbles: true, cancelable: true
@@ -594,39 +596,20 @@ async function run(win, doc) {
   clickCell(2, 5, 90);
   var gotSound = await waitFor(function () { return played.length > 0; }, 1500,
                                '等待单击发声');
-  check('单击空格落一个音', dbg.grid.get(2, 5) === true,
+  check('左键单击空格落一个音', dbg.grid.get(2, 5) === true,
         'cell(2,5) = ' + dbg.grid.get(2, 5));
   check('落笔同时发声', gotSound && played.length === 1, '调用 ' + played.length + ' 次');
   check('音高 = NOTES[行]（第 5 行 → 84）',
         played[0] === win.TM.CONFIG.NOTES[5],
         'note = ' + played[0] + '，期望 ' + win.TM.CONFIG.NOTES[5]);
 
-  // 再点它一下：已经有音 → 单独选中这一格并发声，**不是**擦掉
+  // 再点它一下 = 关掉，而且**不发声**（擦掉不需要听见）
   played.length = 0;
   clickCell(2, 5, 91);
-  await waitFor(function () { return played.length > 0; }, 1500, '等待再点发声');
-  var oneSel = dbg.renderer.selection;
-  check('单击已有的音 = 单独选中那一格',
-        !!oneSel && oneSel.col0 === 2 && oneSel.col1 === 2 &&
-        oneSel.row0 === 5 && oneSel.row1 === 5,
-        oneSel ? JSON.stringify(oneSel) : '无选区');
-  check('单击已有的音不改动图案（不会顺手擦掉）', dbg.grid.get(2, 5) === true,
-        'cell(2,5) = ' + dbg.grid.get(2, 5));
-  check('再点一次仍然发声', played.length === 1, '调用 ' + played.length + ' 次');
-
-  // 右键：彻底退场 —— 不发声、不改图案、不动选区，只把浏览器菜单挡掉
-  var beforeRight = dbg.grid.count();
-  played.length = 0;
-  var ctxEv = rightClick(9, 9);
   await wait(250);
-  check('右键不发声', played.length === 0, '调用 ' + played.length + ' 次');
-  check('右键不改动图案', dbg.grid.count() === beforeRight,
-        dbg.grid.count() + ' vs ' + beforeRight);
-  check('右键不改变选区',
-        !!dbg.renderer.selection && dbg.renderer.selection.col0 === 2 &&
-        dbg.renderer.selection.row0 === 5,
-        JSON.stringify(dbg.renderer.selection));
-  check('右键把浏览器菜单挡掉了', ctxEv.defaultPrevented === true);
+  check('再点一下关掉这个音', dbg.grid.get(2, 5) === false,
+        'cell(2,5) = ' + dbg.grid.get(2, 5));
+  check('关掉的时候不发声', played.length === 0, '调用 ' + played.length + ' 次');
 
   // 不同行 → 不同音高
   played.length = 0;
@@ -635,17 +618,24 @@ async function run(win, doc) {
   check('不同行发出不同音高（第 11 行 → 69）',
         played[0] === win.TM.CONFIG.NOTES[11],
         'note = ' + played[0] + '，期望 ' + win.TM.CONFIG.NOTES[11]);
-  check('点空格不顺手选中（选区留空，方便接着连点着画）',
+  check('左键单击不产生选区（选区只归右键）',
         dbg.renderer.selection === null,
         JSON.stringify(dbg.renderer.selection));
 
-  // 点到画布外不应发声（那里没有格子）
+  // 右键：只做选区 —— 单击选一格，不发声、不改图案、不弹浏览器菜单
+  var beforeRight = dbg.grid.count();
   played.length = 0;
-  canvas.dispatchEvent(new win.MouseEvent('contextmenu', {
-    clientX: rect.left - 20, clientY: rect.top - 20, bubbles: true, cancelable: true
-  }));
-  await wait(200);
-  check('右键画布外不发声', played.length === 0, '调用 ' + played.length + ' 次');
+  var ctxEv = rightClick(9, 9);
+  await wait(250);
+  var oneSel = dbg.renderer.selection;
+  check('右键单击 = 选中那一格（1×1 选区）',
+        !!oneSel && oneSel.col0 === 9 && oneSel.col1 === 9 &&
+        oneSel.row0 === 9 && oneSel.row1 === 9,
+        oneSel ? JSON.stringify(oneSel) : '无选区');
+  check('右键不发声', played.length === 0, '调用 ' + played.length + ' 次');
+  check('右键不改动图案', dbg.grid.count() === beforeRight,
+        dbg.grid.count() + ' vs ' + beforeRight);
+  check('右键把浏览器菜单挡掉了', ctxEv.defaultPrevented === true);
 
   delete dbg.audio.synthNote;              // 还原，避免影响后续断言
 
@@ -904,18 +894,48 @@ async function run(win, doc) {
   check('撤销也能还原「清空」', dbg.grid.count() === baseCount,
         dbg.grid.count() + ' vs 清空前 ' + baseCount);
 
-  // 拖动 = **框选**一条：画笔手势已经让位给选择，拖动不再落笔
-  var beforeDrag = dbg.grid.count();
+  // ── 左键拖动 = 画笔（连续画一整条 / 连续擦一整条）──────
+  //
+  // 起手那一格的值决定整条是画还是擦：从空格起手 = 画，从有音格起手 = 擦。
+  // 逐格 toggle 会画出毛边（指针在同一个格上抖两下就翻回去了）。
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  pressKey('Escape');                      // 前面右键留下的选区先撤掉
+  check('准备：清空、无选区', dbg.grid.count() === 0 && dbg.renderer.selection === null,
+        'count = ' + dbg.grid.count());
+
   tapAt(0, 9, 51);
   for (var dc = 1; dc <= 7; dc++) dragTo(dc, 9, 51);
   dropPointer(51);
-  var dragSel = dbg.renderer.selection;
-  check('拖动拉出一条 8 格宽的选区',
-        !!dragSel && dragSel.col0 === 0 && dragSel.col1 === 7 &&
-        dragSel.row0 === 9 && dragSel.row1 === 9,
-        dragSel ? JSON.stringify(dragSel) : '无选区');
-  check('拖动框选不改动图案', dbg.grid.count() === beforeDrag,
-        dbg.grid.count() + ' vs ' + beforeDrag);
+  check('左键拖动画出一整条 8 格', dbg.grid.count() === 8,
+        'count = ' + dbg.grid.count());
+  check('画笔拖动不产生选区（选区只归右键）', dbg.renderer.selection === null,
+        JSON.stringify(dbg.renderer.selection));
+  pressKey('z', { meta: true });
+  check('一次拖动只占一步撤销（整条一起退）', dbg.grid.count() === 0,
+        'count = ' + dbg.grid.count());
+
+  // 一次 pointermove 跨好几格：中间的格子必须靠 paintLine 补齐，不能只画首尾
+  tapAt(0, 12, 52);
+  dragTo(6, 12, 52);                       // 一步跨 6 格
+  dropPointer(52);
+  var filled = true;
+  for (var fx = 1; fx <= 5; fx++) if (!dbg.grid.get(fx, 12)) filled = false;
+  check('一次跨多格也会补齐中间格', filled && dbg.grid.count() === 7,
+        'count = ' + dbg.grid.count());
+  pressKey('z', { meta: true });
+
+  // 从**有音**的格子起手拖 = 擦除整条
+  for (var sx = 0; sx <= 7; sx++) dbg.grid.set(sx, 9, true);
+  check('准备：铺一整条 8 格', dbg.grid.count() === 8, 'count = ' + dbg.grid.count());
+  tapAt(0, 9, 53);
+  for (var dc2 = 1; dc2 <= 7; dc2++) dragTo(dc2, 9, 53);
+  dropPointer(53);
+  check('从有音格起手拖动 = 连续擦除', dbg.grid.count() === 0,
+        'count = ' + dbg.grid.count());
+  pressKey('z', { meta: true });
+  check('擦除也能一步撤销回来', dbg.grid.count() === 8,
+        'count = ' + dbg.grid.count());
   pressKey('Escape');
 
   // 焦点在「谱子」输入框里时，⌘Z 要交给浏览器，别去撤销棋盘
@@ -926,16 +946,16 @@ async function run(win, doc) {
   check('焦点在输入框里时 ⌘Z 不撤销棋盘',
         dbg.grid.count() === keepCount, 'count = ' + dbg.grid.count());
 
-  // ── 框选：拖动拉框 / 整体搬动 / X 删除 / A 填充 ─────────
-  /** 从一格拖到另一格拉出选区 —— 不需要修饰键，拖动本身就是框选 */
+  // ── 框选：右键拉框 / 整体搬动 / X 删除 / A 填充 ─────────
+  /** 右键从一格拖到另一格，拉出一块选区（左键拖动是画笔，不产生选区） */
   function boxDrag(c0, r0, c1, r1, id) {
     var a = ptAt(c0, r0), b = ptAt(c1, r1);
     mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
-      clientX: a.clientX, clientY: a.clientY,
+      clientX: a.clientX, clientY: a.clientY, button: 2, buttons: 2,
       bubbles: true, cancelable: true, pointerId: id, isPrimary: true
     }));
     mtx.dispatchEvent(new win.PointerEvent('pointermove', {
-      clientX: b.clientX, clientY: b.clientY,
+      clientX: b.clientX, clientY: b.clientY, button: 2, buttons: 2,
       bubbles: true, cancelable: true, pointerId: id, isPrimary: true
     }));
     dropPointer(id);
@@ -955,14 +975,14 @@ async function run(win, doc) {
 
   boxDrag(1, 1, 4, 4, 61);
   var sel = dbg.renderer.selection;
-  check('左键拖动拉出选区', !!sel, sel ? JSON.stringify(sel) : '无选区');
+  check('右键拖动拉出选区', !!sel, sel ? JSON.stringify(sel) : '无选区');
   check('选区矩形含起止两端',
         sel && sel.col0 === 1 && sel.row0 === 1 && sel.col1 === 4 && sel.row1 === 4,
         sel ? JSON.stringify(sel) : '');
 
   boxDrag(6, 6, 4, 4, 62);                 // 反向拖（右下 → 左上）
   sel = dbg.renderer.selection;
-  check('反方向拖动会归一化',
+  check('右键反方向拖动会归一化',
         sel && sel.col0 === 4 && sel.row0 === 4 && sel.col1 === 6 && sel.row1 === 6,
         sel ? JSON.stringify(sel) : '');
 
@@ -1037,22 +1057,23 @@ async function run(win, doc) {
         'count = ' + dbg.grid.count());
   pressKey('z', { meta: true, shift: true });
 
-  // 按住 Alt 点一下（不拖）= 只是听，不该顺手甩出一个跟原件重叠的副本
+  // 按住 Alt 点一下（不拖）= 跟普通单击一样开关这一格，不甩出副本
   var beforeAltClick = dbg.grid.count();
+  var hadCell = dbg.grid.get(6, 8);
   var c0 = ptAt(6, 8);
   mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
     clientX: c0.clientX, clientY: c0.clientY, altKey: true,
     bubbles: true, cancelable: true, pointerId: 81, isPrimary: true
   }));
   dropPointer(81);
-  check('Alt + 单击不产生副本（只是试听这一格）',
-        dbg.grid.count() === beforeAltClick,
-        dbg.grid.count() + ' vs ' + beforeAltClick);
+  check('Alt + 单击不产生副本，只是开关这一格',
+        dbg.grid.count() === beforeAltClick - 1 && dbg.grid.get(6, 8) === false,
+        'count = ' + dbg.grid.count() + '（点之前这一格是 ' + hadCell + '）');
 
-  // Alt 只在「按在选区里」时才有意义：没选区时拖动仍是框选，
-  // 不能「按了 Alt 什么也没发生」。
+  // Alt 只在「按在选区里」时才有意义：没选区时它被忽略，左键拖动仍是画笔
   key('Escape');
   check('Esc 取消选择', dbg.renderer.selection === null);
+  var beforeAltPaint = dbg.grid.count();
   var a0 = ptAt(1, 1), a1 = ptAt(3, 3);
   mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
     clientX: a0.clientX, clientY: a0.clientY, altKey: true,
@@ -1063,12 +1084,11 @@ async function run(win, doc) {
     bubbles: true, cancelable: true, pointerId: 82, isPrimary: true
   }));
   dropPointer(82);
-  check('没有选区时 Alt + 拖动仍然只是框选',
-        dbg.renderer.selection &&
-        dbg.renderer.selection.col0 === 1 && dbg.renderer.selection.col1 === 3 &&
-        dbg.grid.count() === beforeAltClick,
-        (dbg.renderer.selection ? JSON.stringify(dbg.renderer.selection) : '无选区') +
-        ' count=' + dbg.grid.count());
+  check('没有选区时 Alt + 拖动 = 画笔（Alt 被忽略）',
+        dbg.grid.count() >= beforeAltPaint + 3 &&
+        dbg.renderer.selection === null,
+        'count = ' + dbg.grid.count() + '，之前 ' + beforeAltPaint);
+  pressKey('z', { meta: true });
 
 
   // X 删除选区内的音符（重新铺一个块，别依赖上面那串搬动之后的落点）
@@ -1140,14 +1160,18 @@ async function run(win, doc) {
   check('点控件不会取消选择', !!dbg.renderer.selection,
         JSON.stringify(dbg.renderer.selection));
 
-  // 点在选区外 → 取消选择 + 正常落笔
+  // 左键落笔**不动**选区 —— 画笔没有副作用，不该销毁另一个工具的产物。
+  // 想撤掉选区走 Esc，或者点棋盘外的留白。
   key('Escape');
   boxDrag(2, 2, 4, 4, 67);
   check('重新拉出选区', !!dbg.renderer.selection);
   tapAt(10, 10, 68);
   dropPointer(68);
-  check('点选区外会取消选择', dbg.renderer.selection === null);
+  check('左键在选区外落笔，选区原样留着', !!dbg.renderer.selection,
+        JSON.stringify(dbg.renderer.selection));
   check('点选区外同时正常点亮那一格', dbg.grid.get(10, 10) === true);
+  key('Escape');
+  check('Esc 是撤掉选区的确定路径', dbg.renderer.selection === null);
 
   // 焦点在输入框里时，X / A 不能去动选区。
   // 注意：选区内**必须真的有音符**，否则删掉也不会变，这条断言就成了摆设。
@@ -1166,10 +1190,10 @@ async function run(win, doc) {
         dbg.grid.count() === beforeKeys && !!dbg.renderer.selection,
         'count = ' + dbg.grid.count());
 
-  // ── 单击 / 拖动的边界分支 ───────────────────────────────
+  // ── 指针状态的边界分支 ─────────────────────────────────
   // 这两条盯的是判定逻辑里的岔路，不是主路径 —— 改坏了不会立刻显形。
 
-  // 拖出去又拖回起点格 = 什么也没框住 → 仍按单击处理，不能变成「点了没反应」
+  // 画笔从空格起手、拖出去又拖回：整条一直是「画」，不会因为回到起点就翻转
   doc.getElementById('btn-clear').click();
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);
   key('Escape');
@@ -1184,11 +1208,33 @@ async function run(win, doc) {
   moveTo(pAway, 200);
   moveTo(pOut, 200);
   dropPointer(200);
-  check('拖出去又拖回起点格 = 仍算单击（音落下来了）',
-        dbg.grid.get(5, 5) === true, 'cell(5,5) = ' + dbg.grid.get(5, 5));
+  check('画笔拖出去又拖回：起点格保持点亮（不会被来回翻转）',
+        dbg.grid.get(5, 5) === true && dbg.grid.get(7, 7) === true,
+        'cell(5,5) = ' + dbg.grid.get(5, 5) + ' cell(7,7) = ' + dbg.grid.get(7, 7));
+
+  // 选区里拖出去又拖回起点：块回到原位，不会停在半路
+  // （applyMove 每次都从 moveBase 重算，位移归零就等于没动）
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  key('Escape');
+  dbg.grid.set(2, 2, true);
+  dbg.grid.set(3, 3, true);
+  boxDrag(1, 1, 4, 4, 210);
+  var pIn = ptAt(2, 2), pFar = ptAt(8, 8);
+  mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: pIn.clientX, clientY: pIn.clientY,
+    bubbles: true, cancelable: true, pointerId: 211, isPrimary: true
+  }));
+  moveTo(pFar, 211);
+  moveTo(pIn, 211);
+  dropPointer(211);
+  check('选区里拖出去又拖回：块与选区都回到原处',
+        dbg.grid.count() === 2 && dbg.grid.get(2, 2) && dbg.grid.get(3, 3) &&
+        dbg.renderer.selection.col0 === 1 && dbg.renderer.selection.col1 === 4,
+        'count = ' + dbg.grid.count() + ' sel=' + JSON.stringify(dbg.renderer.selection));
 
   // 在已有选区里单击：选区原样留着，不能缩成 1×1
-  // （点空格按的是「听一下这格」，不是「重新选一格」）
+  // （那一下是「开关这一格」，不是「重新选一格」）
   key('Escape');
   dbg.grid.set(1, 1, true);
   boxDrag(1, 1, 4, 4, 201);
@@ -1285,9 +1331,13 @@ async function run(win, doc) {
         'count = ' + dbg.grid.count());
 
   // 贴到右下角：整块夹进棋盘，而不是裁掉溢出的两行两列
-  // 先把选区落到 (15,15)：单击空格落笔，再单击它 = 单独选中这一格
-  tapAt(15, 15, 104); dropPointer(104);
-  tapAt(15, 15, 105); dropPointer(105);
+  // 先把选区落到 (15,15)：右键单击一格 = 1×1 选区
+  // （左键单击不行了 —— 它只会把那一格开开关关，不产生选区）
+  rightClick(15, 15, 104);
+  check('准备：右键把锚点选在 (15,15)',
+        !!dbg.renderer.selection && dbg.renderer.selection.col0 === 15 &&
+        dbg.renderer.selection.row0 === 15,
+        JSON.stringify(dbg.renderer.selection));
   cmd('v');
   check('贴到边缘时整块夹进棋盘（不丢音）',
         dbg.grid.get(13, 13) && dbg.grid.get(15, 13) &&
