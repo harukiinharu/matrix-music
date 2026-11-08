@@ -314,7 +314,14 @@
       if (renderer.selection && inSelection(cell)) {
         // 按在已有选区**里面** = 准备整块搬走；没拖起来就只是「听一下这一格」，
         // 选区原样留着 —— 与图形软件里「按住已选中的对象拖动」同一条规则。
-        press = { cell: cell, mode: 'move', moved: false };
+        //
+        // 按住 Alt 则是**复制**那一块：原件留在原地，拖走的是副本。
+        // 与 Figma / Illustrator 的 Option+拖动同一条规则，所以不需要额外的
+        // 「复制模式」开关，也不必先 ⌘C 再 ⌘V。
+        //
+        // Alt 只在这个位置有意义：没有选区、或按在选区外时它照旧被忽略，
+        // 拖动仍是框选 —— 否则「按了 Alt 却什么也没发生」会让人以为卡了。
+        press = { cell: cell, mode: e.altKey ? 'dup' : 'move', moved: false };
         moveBase = grid.cells.slice();
         moveFrom = cell;
         moveRect = renderer.selection;
@@ -336,13 +343,15 @@
       if (!press.moved) {
         if (cell.col === press.cell.col && cell.row === press.cell.row) return;
         press.moved = true;
-        dragMode = (press.mode === 'move') ? 'move' : 'select';
-        // 整次搬动 = 一步撤销。按下时还不知道会不会拖起来，所以推迟到这里，
+        dragMode = (press.mode === 'move') ? 'move'
+                 : (press.mode === 'dup')  ? 'dup'
+                 : 'select';
+        // 整次搬动 / 复制 = 一步撤销。按下时还不知道会不会拖起来，所以推迟到这里，
         // 免得「在选区里点一下听听」也白占一步撤销。
-        if (dragMode === 'move') pushHistory();
+        if (dragMode !== 'select') pushHistory();
       }
 
-      if (dragMode === 'move') applyMove(cell);
+      if (dragMode === 'move' || dragMode === 'dup') applyMove(cell, dragMode === 'dup');
       else setSelection(press.cell, cell);
     });
 
@@ -362,8 +371,9 @@
       // 真框出了一块（不止一格）才算框选；1×1 等于什么也没框住
       var boxed = p.moved && s && (s.col1 > s.col0 || s.row1 > s.row0);
 
-      if (p.mode === 'move') {
+      if (p.mode === 'move' || p.mode === 'dup') {
         // 搬动已经在 pointermove 里实时算过；没挪动就只是试听这一格
+        // （按住 Alt 点一下也一样：先听，别顺手复制出一个跟原件重叠的副本）
         if (commit && !p.moved && grid.get(p.cell.col, p.cell.row)) audition(p.cell);
       } else if (commit && !boxed) {
         if (grid.get(p.cell.col, p.cell.row)) {
@@ -519,8 +529,8 @@
   // 若把它们声明在 `bindInput` 里，helper 里访问到的是未声明变量 ——
   // 在 'use strict' 下直接抛 ReferenceError，而事件处理里的异常会被吞掉，
   // 表现成「按下去什么也没发生」，极难查。踩过。
-  var press = null;           // 按下了但还没松手：{ cell, mode: 'click'|'move', moved }
-  var dragMode = null;        // null | 'select'（框选）| 'move'（搬选区）
+  var press = null;           // 按下了但还没松手：{ cell, mode: 'click'|'move'|'dup', moved }
+  var dragMode = null;        // null | 'select'（框选）| 'move'（搬选区）| 'dup'（复制并拖走）
   var moveBase = null;        // 搬动开始时整张谱子的副本（每次移动都从它重算）
   var moveFrom = null;        // 搬动起点格
   var moveRect = null;        // 搬动开始时选区的矩形
@@ -528,7 +538,7 @@
 
   // ── 框选 ────────────────────────────────────────────────
   //
-  // 选区就是一块矩形。Alt + 左键拉框；框内按住左键整体搬走；
+  // 选区就是一块矩形。左键拉框；框内按住左键整体搬走（按住 Alt 拖动 = 复制并拖走副本）；
   // X 清空这一块、A 填满这一块、Esc 取消。
   function setSelection(a, b) {
     if (!a) { renderer.selection = null; return; }
@@ -550,8 +560,16 @@
    * 每次都从 `moveBase`（按下那一刻的整张谱子）**重算**，而不是在上一次结果上
    * 继续叠加 —— 否则来回拖会把同一块反复叠上去、越拖越多。位移还会夹在棋盘内，
    * 拖不出边界。
+   *
+   * @param {object} cell 指针所在格
+   * @param {boolean} [copy] true = 复制（原件留着，拖走的是副本）
+   *
+   * 复制与搬动只差「要不要先清掉原位置」这一件事，其余完全一样 ——
+   * 同一个手势族的两种变体，不该有两套覆盖规则。
+   * 所以副本也**只贴音符、不清空格**（与 `applyMove` 同口径），
+   * 和 ⌘V 的「盖章」不同：粘贴是明确往某处盖一块，拖动是搬一块过去。
    */
-  function applyMove(cell) {
+  function applyMove(cell, copy) {
     var s = moveRect;
     var dc = cell.col - moveFrom.col;
     var dr = cell.row - moveFrom.row;
@@ -562,8 +580,10 @@
 
     var next = moveBase.slice();
     var c, r;
-    for (c = s.col0; c <= s.col1; c++) {           // 先清掉原位置
-      for (r = s.row0; r <= s.row1; r++) next[c * grid.rows + r] = 0;
+    if (!copy) {
+      for (c = s.col0; c <= s.col1; c++) {         // 先清掉原位置
+        for (r = s.row0; r <= s.row1; r++) next[c * grid.rows + r] = 0;
+      }
     }
     for (c = s.col0; c <= s.col1; c++) {           // 再把这一块贴到新位置
       for (r = s.row0; r <= s.row1; r++) {

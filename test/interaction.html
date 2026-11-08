@@ -997,6 +997,80 @@ async function run(win, doc) {
         'count = ' + dbg.grid.count());
   pressKey('z', { meta: true, shift: true });
 
+  // ── 按住 Alt 拖动 = 复制（原件留在原地）────────────────
+  //
+  // 与上面那串搬动同一起点，正好做对照：同样是「在选区里按住拖」，
+  // 多按一个 Alt，差别只在**原件留不留**。
+  var beforeDup = dbg.grid.count();
+  var d0 = ptAt(3, 5);                     // 按在选区内（与搬动同一处）
+  mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: d0.clientX, clientY: d0.clientY, altKey: true,
+    bubbles: true, cancelable: true, pointerId: 80, isPrimary: true
+  }));
+  var d1 = ptAt(6, 8);                     // +3 列 +3 行
+  mtx.dispatchEvent(new win.PointerEvent('pointermove', {
+    clientX: d1.clientX, clientY: d1.clientY, altKey: true,
+    bubbles: true, cancelable: true, pointerId: 80, isPrimary: true
+  }));
+  dropPointer(80);
+
+  check('Alt + 拖动会把块复制一份（音符数翻倍）',
+        dbg.grid.count() === beforeDup * 2,
+        dbg.grid.count() + ' vs ' + (beforeDup * 2));
+  check('Alt + 拖动后原件仍在原地',
+        dbg.grid.get(3, 5) && dbg.grid.get(4, 5) &&
+        dbg.grid.get(3, 6) && dbg.grid.get(4, 6),
+        'count = ' + dbg.grid.count());
+  check('副本整块落在拖到的位置（形状一致）',
+        dbg.grid.get(6, 8) && dbg.grid.get(7, 8) &&
+        dbg.grid.get(6, 9) && dbg.grid.get(7, 9),
+        'count = ' + dbg.grid.count());
+  check('选区跟着副本一起过去',
+        dbg.renderer.selection.col0 === 5 && dbg.renderer.selection.row0 === 7 &&
+        dbg.renderer.selection.col1 === 8 && dbg.renderer.selection.row1 === 10,
+        JSON.stringify(dbg.renderer.selection));
+
+  pressKey('z', { meta: true });           // 整次复制 = 一步，且只撤掉副本
+  check('整次复制只占一步撤销：副本没了、原件留着',
+        dbg.grid.count() === beforeDup &&
+        dbg.grid.get(3, 5) && !dbg.grid.get(6, 8),
+        'count = ' + dbg.grid.count());
+  pressKey('z', { meta: true, shift: true });
+
+  // 按住 Alt 点一下（不拖）= 只是听，不该顺手甩出一个跟原件重叠的副本
+  var beforeAltClick = dbg.grid.count();
+  var c0 = ptAt(6, 8);
+  mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: c0.clientX, clientY: c0.clientY, altKey: true,
+    bubbles: true, cancelable: true, pointerId: 81, isPrimary: true
+  }));
+  dropPointer(81);
+  check('Alt + 单击不产生副本（只是试听这一格）',
+        dbg.grid.count() === beforeAltClick,
+        dbg.grid.count() + ' vs ' + beforeAltClick);
+
+  // Alt 只在「按在选区里」时才有意义：没选区时拖动仍是框选，
+  // 不能「按了 Alt 什么也没发生」。
+  key('Escape');
+  check('Esc 取消选择', dbg.renderer.selection === null);
+  var a0 = ptAt(1, 1), a1 = ptAt(3, 3);
+  mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
+    clientX: a0.clientX, clientY: a0.clientY, altKey: true,
+    bubbles: true, cancelable: true, pointerId: 82, isPrimary: true
+  }));
+  mtx.dispatchEvent(new win.PointerEvent('pointermove', {
+    clientX: a1.clientX, clientY: a1.clientY, altKey: true,
+    bubbles: true, cancelable: true, pointerId: 82, isPrimary: true
+  }));
+  dropPointer(82);
+  check('没有选区时 Alt + 拖动仍然只是框选',
+        dbg.renderer.selection &&
+        dbg.renderer.selection.col0 === 1 && dbg.renderer.selection.col1 === 3 &&
+        dbg.grid.count() === beforeAltClick,
+        (dbg.renderer.selection ? JSON.stringify(dbg.renderer.selection) : '无选区') +
+        ' count=' + dbg.grid.count());
+
+
   // X 删除选区内的音符（重新铺一个块，别依赖上面那串搬动之后的落点）
   doc.getElementById('btn-clear').click();
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);

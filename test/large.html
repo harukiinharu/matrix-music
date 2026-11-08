@@ -838,6 +838,45 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     check('大面板：粘贴没多出额外的音（3 抄 + 3 贴）',
           dbg.grid.count() === 6, 'count = ' + dbg.grid.count());
 
+    // ── Alt + 拖动 = 复制：另一条代码路径，同样要守 stride ──
+    // 它走的是 applyMove 的 copy 分支（不是剪贴板），但同样按 grid.rows 写回。
+    // 块取 3 列 × 5 行、里面三个音上下不对称 —— 拿块自己的行数当 stride 会整片错位。
+    dbg.grid.clear();
+    dbg.grid.set(selBase + 2, 40, true);
+    dbg.grid.set(selBase + 4, 42, true);
+    dbg.grid.set(selBase + 3, 44, true);
+    boxDragCell(selBase + 2, 40, selBase + 4, 44, 101);
+
+    function altDragCell(c0, r0, c1, r1, pointerId) {
+      canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+        clientX: xOf(c0), clientY: yOf(r0), altKey: true,
+        bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
+      }));
+      canvas.dispatchEvent(new win.PointerEvent('pointermove', {
+        clientX: xOf(c1), clientY: yOf(r1), altKey: true,
+        bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
+      }));
+      canvas.dispatchEvent(new win.PointerEvent('pointerup', {
+        clientX: xOf(c1), clientY: yOf(r1),
+        bubbles: true, pointerId: pointerId, isPrimary: true
+      }));
+    }
+
+    altDragCell(selBase + 2, 40, selBase + 8, 30, 102);   // +6 列 −10 行
+    check('大面板：Alt + 拖动的副本行列各归各位（不串行）',
+          dbg.grid.get(selBase + 8, 30) && dbg.grid.get(selBase + 10, 32) &&
+          dbg.grid.get(selBase + 9, 34),
+          'count = ' + dbg.grid.count());
+    check('大面板：Alt + 拖动后原件与副本共 6 个音',
+          dbg.grid.count() === 6 &&
+          dbg.grid.get(selBase + 2, 40) && dbg.grid.get(selBase + 4, 42) &&
+          dbg.grid.get(selBase + 3, 44),
+          'count = ' + dbg.grid.count());
+    cmdKey('z');
+    check('大面板：Alt + 拖动整次复制一步撤销（回到 3 个音）',
+          dbg.grid.count() === 3 && !dbg.grid.get(selBase + 8, 30),
+          'count = ' + dbg.grid.count());
+
     // ── 合成一帧，确认渲染链路跑得动 ───────────────────────
     // 采样前关掉微光和播放列：两者都是合成层叠加，会把格子颜色改掉
     R3.setGlowEnabled(false);
