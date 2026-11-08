@@ -275,8 +275,8 @@
   for (var zp = 0; zp < 120; zp++) rz.stepGlow(5, false);
   check('暂停两秒后完全熄灭', rz.glow[0][5] === 0, 'glow = ' + rz.glow[0][5]);
 
-  // ── 5.4 右键试听的临时描边（flash）─────────────────────
-  // 关键不变式：**只描边，不改填充**。否则暗格整体变亮，会被当成「右键改了格子状态」。
+  // ── 5.4 试听的临时描边（flash）────────────────────────
+  // 关键不变式：**只描边，不改填充**。否则暗格整体变亮，会被当成「格子状态被改了」。
   var gh = new TM.Grid();
   var rh = new TM.Renderer(document.getElementById('tcanvas'), gh);
   rh.showPlayhead = false;

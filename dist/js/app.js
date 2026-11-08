@@ -13,7 +13,6 @@
 
   var grid, audio, sequencer, renderer;
   var canvas;
-  var paintValue = null;
 
   // ── 乐谱保存 ────────────────────────────────────────────
   var SAVE_DEBOUNCE_MS = 300;      // 拖动时会连发变更，攒一下再写
@@ -289,19 +288,21 @@
 
   // ── 交互 ────────────────────────────────────────────────
   //
-  // 绘制必须与音频启动解耦：点下就立刻上色，不能等 AudioContext 就绪。
-  // 拖动时还要把两次事件之间跳过的格子补上，否则快速拖动会漏格。
+  // 落笔与音频启动解耦：格子的增删不等 AudioContext 就绪。
+  // 但**落笔要等松手** —— 按下那一刻还分不清用户想点一下还是想拉框（见下）。
   function bindInput() {
     var rect = null;          // 缓存的画布矩形，避免每次 pointermove 都触发重排
-    var lastCell = null;
-    // 拖动状态（dragMode / anchor / move*）声明在模块级 —— 见文件下方「拖动状态」
+    // 拖动状态（press / dragMode / move*）声明在模块级 —— 见文件下方「指针意图」
     // 那段注释：applyMove() 定义在 bindInput 外面，声明在这里它就看不见了。
 
+    // 左键是**一个**手势，却要表达两件事：单击 = 选中并试听（空格子则是落笔），
+    // 拖动 = 框选。按下那一刻还分不出是哪一种，所以只记下起点，等指针动没动。
+    //
+    // 判据是「有没有离开起点格」，不是像素距离：抖一下没跨格就还算单击，
+    // 正好和「格子」这个操作单位对齐。离开后又拖回起点格，等于什么也没框住，
+    // 松手时仍按单击处理 —— 否则「手抖出去又抖回来」会变成点了没反应。
     canvas.addEventListener('pointerdown', function (e) {
-      // 只响应主键（左键）。浏览器在右键时会**先**派发 pointerdown(button=2)
-      // 再派发 contextmenu；不判断按键的话右键会先把格子翻转，
-      // 然后才发出试听的声音 —— 试听绝不能改动图案。
-      if (e.button !== 0) return;
+      if (e.button !== 0) return;      // 右键不参与任何操作（见下方 contextmenu）
       e.preventDefault();
       rect = canvas.getBoundingClientRect();
       if (canvas.setPointerCapture) {
@@ -310,79 +311,80 @@
       var cell = cellAt(e, rect);
       if (!cell) return;
 
-      // Alt + 左键拖 = 拉框选择
-      if (e.altKey) {
-        dragMode = 'select';
-        dragAnchor = cell;
-        setSelection(cell, cell);
-        lastCell = null;
-        return;
-      }
-
-      // 已有选区、且按在选区**里面** = 整体搬走这一块
       if (renderer.selection && inSelection(cell)) {
-        dragMode = 'move';
+        // 按在已有选区**里面** = 准备整块搬走；没拖起来就只是「听一下这一格」，
+        // 选区原样留着 —— 与图形软件里「按住已选中的对象拖动」同一条规则。
+        press = { cell: cell, mode: 'move', moved: false };
         moveBase = grid.cells.slice();
         moveFrom = cell;
         moveRect = renderer.selection;
         moveDc = 0; moveDr = 0;
-        pushHistory();                 // 整次搬动 = 一步撤销
-        return;
+      } else {
+        press = { cell: cell, mode: 'click', moved: false };
       }
-
-      // 按在选区外：先取消选择，再按老路子涂抹
-      if (renderer.selection) setSelection(null);
-
-      dragMode = 'paint';
-      pushHistory();                                  // 一次按下 = 一步撤销
-      paintValue = grid.toggle(cell.col, cell.row);   // 同步上色，不等音频
-      lastCell = cell;
-      boot();                                         // 音频后台启动
+      boot();                          // 点击本身就是用户手势，顺手解锁音频
     });
 
     canvas.addEventListener('pointermove', function (e) {
       if (!rect) rect = canvas.getBoundingClientRect();
-      autoPanAtEdge(e);          // 拖到边缘继续平移（大面板）
+      if (!press) return;
+      autoPanAtEdge(e);                // 拖到边缘继续平移（大面板）
 
-      if (dragMode === 'select') {
-        var sel = cellAt(e, rect);
-        if (sel) setSelection(dragAnchor, sel);
-        return;
-      }
-      if (dragMode === 'move') {
-        var dst = cellAt(e, rect);
-        if (dst) applyMove(dst);
-        return;
-      }
-      if (dragMode !== 'paint' || paintValue === null) return;
+      var cell = cellAt(e, rect);
+      if (!cell) return;
 
-      // 快速拖动时浏览器会把多个移动合并成一个事件，
-      // getCoalescedEvents() 能取回中间点，避免漏格。
-      var pts = (e.getCoalescedEvents && e.getCoalescedEvents().length)
-        ? e.getCoalescedEvents() : [e];
-
-      for (var i = 0; i < pts.length; i++) {
-        var cell = cellAt(pts[i], rect);
-        if (!cell) continue;
-        grid.paintLine(lastCell, cell, paintValue);
-        lastCell = cell;
+      if (!press.moved) {
+        if (cell.col === press.cell.col && cell.row === press.cell.row) return;
+        press.moved = true;
+        dragMode = (press.mode === 'move') ? 'move' : 'select';
+        // 整次搬动 = 一步撤销。按下时还不知道会不会拖起来，所以推迟到这里，
+        // 免得「在选区里点一下听听」也白占一步撤销。
+        if (dragMode === 'move') pushHistory();
       }
+
+      if (dragMode === 'move') applyMove(cell);
+      else setSelection(press.cell, cell);
     });
 
-    var endPaint = function () {
-      if (dragMode === null) return;
+    /**
+     * 松手收尾，并判定这一次是「单击」还是「拖动」。
+     *
+     * 只有确定的单击才落笔 —— 框选绝不能顺手把起点那一格点亮或擦掉。
+     *
+     * @param {boolean} commit 指针在画布内抬起（true）还是取消 / 抬在画布外（false）
+     */
+    var finishPress = function (commit) {
+      var p = press;
+      if (!p) return;
+      press = null;
+
+      var s = renderer.selection;
+      // 真框出了一块（不止一格）才算框选；1×1 等于什么也没框住
+      var boxed = p.moved && s && (s.col1 > s.col0 || s.row1 > s.row0);
+
+      if (p.mode === 'move') {
+        // 搬动已经在 pointermove 里实时算过；没挪动就只是试听这一格
+        if (commit && !p.moved && grid.get(p.cell.col, p.cell.row)) audition(p.cell);
+      } else if (commit && !boxed) {
+        if (grid.get(p.cell.col, p.cell.row)) {
+          setSelection(p.cell, p.cell);              // 单击已有的音 = 单独选中它
+        } else {
+          setSelection(null);                        // 点在选区外：旧选区就此撤掉
+          pushHistory();
+          grid.set(p.cell.col, p.cell.row, true);    // 单击空格 = 落一个音
+        }
+        audition(p.cell);                            // 两种都发一次声
+      }
+
       dragMode = null;
-      paintValue = null;
-      lastCell = null;
-      dragAnchor = null;
       moveBase = null;
       moveFrom = null;
       moveRect = null;
     };
-    canvas.addEventListener('pointerup', endPaint);
-    canvas.addEventListener('pointercancel', endPaint);
-    // 指针在画布外抬起时也要收尾
-    global.addEventListener('pointerup', endPaint);
+    canvas.addEventListener('pointerup', function () { finishPress(true); });
+    canvas.addEventListener('pointercancel', function () { finishPress(false); });
+    // 指针在画布外抬起：收尾但不落笔（坐标已经不在棋盘上了）
+    global.addEventListener('pointerup', function () { finishPress(false); });
 
     // 空格 = 暂停 / 继续（清空不再占用快捷键）
     global.addEventListener('keydown', function (e) {
@@ -485,41 +487,40 @@
     global.addEventListener('resize', function () { rect = null; });
     global.addEventListener('scroll', function () { rect = null; }, true);
 
-    // 右键：试听该格的音，不改动图案（顺带屏蔽浏览器右键菜单）。
-    // 挂在容器上而不是 canvas 上：这样右键落在棋盘周围的留白里也不会
-    // 弹出浏览器菜单。大面板（large.html）的容器是 .board-shell。
+    // 右键：这个页面**不给右键任何功能**。试听已经并入左键单击
+    // （见 finishPress），所以右键只剩下「别弹浏览器菜单」这一件事 ——
+    // canvas 上弹出的「存储图像」对一块实时绘制的画布毫无意义，只会打断操作。
+    // 挂在容器上而不是 canvas 上：落在棋盘周围的留白里也一并屏蔽。
+    // 大面板（large.html）的容器是 .board-shell。
     var wrap = document.querySelector('.board-shell') ||
                document.querySelector('.canvas-wrap') || canvas;
     wrap.addEventListener('contextmenu', function (e) {
       e.preventDefault();
-      if (!rect) rect = canvas.getBoundingClientRect();
-      var cell = cellAt(e, rect);
-      if (cell) audition(cell);
     });
   }
 
   /**
-   * 试听某一格对应的音：发声 + 在该格套一圈白色描边，告诉用户按的是哪一格。
-   * **只描边，不改动图案** —— 右键绝不能让格子的黑/白状态看起来变了。
+   * 试听某一格对应的音：发声 + 在该格套一圈描边，确认响的是哪一格。
+   *
+   * 走音序器同一张音表，保证「点出来的音」与「播放时听到的音」永远一致。
    * 音频未启动时先启动（boot 内部已 catch，始终会 resolve）。
    */
   function audition(cell) {
-    // 走音序器同一张音表，保证「试听听到的音」与「播放时听到的音」永远一致
     var note = sequencer.notes[cell.row];
-    renderer.flash(cell.col, cell.row);   // 同步给出「按的是这格」的提示
+    renderer.flash(cell.col, cell.row);   // 同步给出「响的是这格」的提示
     boot().then(function () {
       audio.synthNote(note, 0);
     });
   }
 
-  // ── 拖动状态 ────────────────────────────────────────────
+  // ── 指针意图 ────────────────────────────────────────────
   //
   // 这些必须声明在**模块级**：`applyMove()` 等 helper 定义在 `bindInput` 外面，
   // 若把它们声明在 `bindInput` 里，helper 里访问到的是未声明变量 ——
   // 在 'use strict' 下直接抛 ReferenceError，而事件处理里的异常会被吞掉，
   // 表现成「按下去什么也没发生」，极难查。踩过。
-  var dragMode = null;        // null | 'paint'（涂格）| 'select'（拉框）| 'move'（搬选区）
-  var dragAnchor = null;      // 拉框起点
+  var press = null;           // 按下了但还没松手：{ cell, mode: 'click'|'move', moved }
+  var dragMode = null;        // null | 'select'（框选）| 'move'（搬选区）
   var moveBase = null;        // 搬动开始时整张谱子的副本（每次移动都从它重算）
   var moveFrom = null;        // 搬动起点格
   var moveRect = null;        // 搬动开始时选区的矩形

@@ -122,7 +122,7 @@
     this.loopOut = Math.min(this.cols, CFG.INITIAL_LOOP_COLS || this.cols) - 1;
     this.showPlayhead = true;
     this.showGlow = true;         // 微光开关
-    this.highlights = [];         // 右键试听的临时白色描边 [{col,row,until}]
+    this.highlights = [];         // 试听的临时白色描边 [{col,row,until}]
     this.selection = null;        // 框选区域 {col0,row0,col1,row1}（已归一化）
     this.stepIndex = 0;
 
@@ -183,10 +183,10 @@
 
   /**
    * 在指定格子上套一圈白色描边，持续 ms 毫秒后自动消失。
-   * 用于右键试听时告诉用户「我正在按这一格」。
+   * 用于试听时告诉用户「响的是这一格」。
    *
    * 注意：**只描边，不改填充**。曾经试过用微光做反馈，
-   * 但那样会让暗格整体变亮，看起来像右键把格子状态改了（见 AGENTS.md §7）。
+   * 但那样会让暗格整体变亮，看起来像格子状态被改了（见 AGENTS.md §7）。
    */
   Renderer.prototype.flash = function (col, row, ms) {
     if (!this.grid.inBounds(col, row)) return false;

@@ -124,7 +124,7 @@
     GLOW_SIZE: 512,              // 光晕图层边长（逻辑分辨率，够用且省 4 倍面积）
     GLOW_DECAY: 0.9,             // 每帧衰减系数（60fps → 半衰约 110ms，约 0.4s 收干净）
 
-    // 右键试听时套在那一格上的描边（只是描边，不改填充 —— 见 AGENTS.md §7）
+    // 试听时套在那一格上的描边（只是描边，不改填充 —— 见 AGENTS.md §7）
     HIGHLIGHT_MS: 280,           // 持续时间
     HIGHLIGHT_INSET: 1.2,        // 相对格子边缘的内缩（逻辑像素）
     HIGHLIGHT_WIDTH: 1.6,        // 线宽（逻辑像素）
@@ -149,7 +149,7 @@
       select: '#FFFFFF',
       selectFill: 'rgba(255, 255, 255, 0.12)',
 
-      // 播放列高亮 + 右键试听描边
+      // 播放列高亮 + 试听描边
       playhead: 'rgba(255, 255, 255, 0.06)',
       highlight: '#FFFFFF',
 

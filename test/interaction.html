@@ -508,12 +508,18 @@ async function run(win, doc) {
   var canvas = doc.getElementById('matrix');
   var rect = canvas.getBoundingClientRect();
 
+  /**
+   * 在左上角那一格完整点一下（按下 + 抬起）。
+   * 落笔现在发生在**抬起**（按下时还分不清要点还是要拉框），所以必须成对发。
+   */
   function tap(pointerId) {
-    canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+    var p = {
       clientX: rect.left + rect.width / 32,
       clientY: rect.top + rect.height / 32,
-      bubbles: true, pointerId: pointerId, isPrimary: true
-    }));
+      bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
+    };
+    canvas.dispatchEvent(new win.PointerEvent('pointerdown', p));
+    canvas.dispatchEvent(new win.PointerEvent('pointerup', p));
   }
 
   check('初始网格为空', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
@@ -534,7 +540,7 @@ async function run(win, doc) {
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);
   check('清空按钮仍然清空网格', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
 
-  // ── 右键试听（只发声，不改动图案、不改格子外观）────────
+  // ── 单击 = 选中并试听；右键没有任何功能 ─────────────────
   var played = [];
   var origSynth = dbg.audio.synthNote;
   dbg.audio.synthNote = function (note, when) {
@@ -550,9 +556,24 @@ async function run(win, doc) {
   }
 
   /**
+   * 完整点一下某一格：按下 + 抬起。
+   * 落笔发生在**抬起** —— 按下那一刻还分不清用户想点一下还是要拉框。
+   */
+  function clickCell(col, row, id) {
+    var p = at(col, row);
+    var ev = {
+      clientX: p.clientX, clientY: p.clientY,
+      bubbles: true, cancelable: true, pointerId: id, isPrimary: true
+    };
+    canvas.dispatchEvent(new win.PointerEvent('pointerdown', ev));
+    canvas.dispatchEvent(new win.PointerEvent('pointerup', ev));
+  }
+
+  /**
    * 模拟真实右键：浏览器会**先**派发 pointerdown(button=2)，
    * 再派发 contextmenu。只派发 contextmenu 是测不出问题的
    * （早期版本就是漏了这个才让右键把格子翻转了）。
+   * @returns {Event} contextmenu 事件本身，用来断言它被 preventDefault 了
    */
   function rightClick(col, row) {
     var p = at(col, row);
@@ -560,60 +581,65 @@ async function run(win, doc) {
       clientX: p.clientX, clientY: p.clientY,
       bubbles: true, cancelable: true, pointerId: 9, isPrimary: true, button: 2, buttons: 2
     }));
-    canvas.dispatchEvent(new win.MouseEvent('contextmenu', {
+    var ctx = new win.MouseEvent('contextmenu', {
       clientX: p.clientX, clientY: p.clientY, bubbles: true, cancelable: true
-    }));
+    });
+    canvas.dispatchEvent(ctx);
+    return ctx;
   }
 
   check('试听前网格为空', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
 
-  rightClick(2, 5);
-  check('右键在那一格套上描边（告诉用户按的是哪格）',
-        dbg.renderer.highlights.length === 1 &&
-        dbg.renderer.highlights[0].col === 2 && dbg.renderer.highlights[0].row === 5,
-        dbg.renderer.highlights.length
-          ? '(' + dbg.renderer.highlights[0].col + ',' + dbg.renderer.highlights[0].row + ')'
-          : '无描边');
-
+  // 空格子点一下 = 落一个音，同时响一声 —— 画的时候就能听见画的是什么
+  clickCell(2, 5, 90);
   var gotSound = await waitFor(function () { return played.length > 0; }, 1500,
-                               '等待右键试听发声');
-  check('右键触发发声', gotSound && played.length === 1, '调用 ' + played.length + ' 次');
+                               '等待单击发声');
+  check('单击空格落一个音', dbg.grid.get(2, 5) === true,
+        'cell(2,5) = ' + dbg.grid.get(2, 5));
+  check('落笔同时发声', gotSound && played.length === 1, '调用 ' + played.length + ' 次');
   check('音高 = NOTES[行]（第 5 行 → 84）',
         played[0] === win.TM.CONFIG.NOTES[5],
         'note = ' + played[0] + '，期望 ' + win.TM.CONFIG.NOTES[5]);
 
-  // 这两条是本轮的核心：右键绝不能改动图案
-  await wait(200);
-  check('右键不改动图案', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
-  check('右键不翻转该格', dbg.grid.get(2, 5) === false,
-        'cell(2,5) = ' + dbg.grid.get(2, 5));
-
+  // 再点它一下：已经有音 → 单独选中这一格并发声，**不是**擦掉
   played.length = 0;
-  rightClick(2, 11);
-  await waitFor(function () { return played.length > 0; }, 1500);
-  check('不同行试听不同音高（第 11 行 → 69）',
+  clickCell(2, 5, 91);
+  await waitFor(function () { return played.length > 0; }, 1500, '等待再点发声');
+  var oneSel = dbg.renderer.selection;
+  check('单击已有的音 = 单独选中那一格',
+        !!oneSel && oneSel.col0 === 2 && oneSel.col1 === 2 &&
+        oneSel.row0 === 5 && oneSel.row1 === 5,
+        oneSel ? JSON.stringify(oneSel) : '无选区');
+  check('单击已有的音不改动图案（不会顺手擦掉）', dbg.grid.get(2, 5) === true,
+        'cell(2,5) = ' + dbg.grid.get(2, 5));
+  check('再点一次仍然发声', played.length === 1, '调用 ' + played.length + ' 次');
+
+  // 右键：彻底退场 —— 不发声、不改图案、不动选区，只把浏览器菜单挡掉
+  var beforeRight = dbg.grid.count();
+  played.length = 0;
+  var ctxEv = rightClick(9, 9);
+  await wait(250);
+  check('右键不发声', played.length === 0, '调用 ' + played.length + ' 次');
+  check('右键不改动图案', dbg.grid.count() === beforeRight,
+        dbg.grid.count() + ' vs ' + beforeRight);
+  check('右键不改变选区',
+        !!dbg.renderer.selection && dbg.renderer.selection.col0 === 2 &&
+        dbg.renderer.selection.row0 === 5,
+        JSON.stringify(dbg.renderer.selection));
+  check('右键把浏览器菜单挡掉了', ctxEv.defaultPrevented === true);
+
+  // 不同行 → 不同音高
+  played.length = 0;
+  clickCell(6, 11, 92);
+  await waitFor(function () { return played.length > 0; }, 1500, '等待换行发声');
+  check('不同行发出不同音高（第 11 行 → 69）',
         played[0] === win.TM.CONFIG.NOTES[11],
         'note = ' + played[0] + '，期望 ' + win.TM.CONFIG.NOTES[11]);
-  check('多次右键仍不改动图案', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
+  check('点空格不顺手选中（选区留空，方便接着连点着画）',
+        dbg.renderer.selection === null,
+        JSON.stringify(dbg.renderer.selection));
 
-  // 左键仍然正常翻转（确认按键判断没有误伤左键）
-  var p5 = at(4, 3);
-  canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
-    clientX: p5.clientX, clientY: p5.clientY,
-    bubbles: true, cancelable: true, pointerId: 10, isPrimary: true, button: 0, buttons: 1
-  }));
-  await waitFor(function () { return dbg.grid.get(4, 3) === true; }, 800);
-  check('左键仍然正常点亮（按键判断没误伤）', dbg.grid.get(4, 3) === true,
-        'cell(4,3) = ' + dbg.grid.get(4, 3));
-  var p5b = at(4, 3);
-  canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
-    clientX: p5b.clientX, clientY: p5b.clientY,
-    bubbles: true, cancelable: true, pointerId: 11, isPrimary: true, button: 0, buttons: 1
-  }));
-  await waitFor(function () { return dbg.grid.get(4, 3) === false; }, 800);
-  check('左键再点可关掉', dbg.grid.get(4, 3) === false);
-
-  // 点到画布外不应发声
+  // 点到画布外不应发声（那里没有格子）
   played.length = 0;
   canvas.dispatchEvent(new win.MouseEvent('contextmenu', {
     clientX: rect.left - 20, clientY: rect.top - 20, bubbles: true, cancelable: true
@@ -847,19 +873,19 @@ async function run(win, doc) {
   doc.getElementById('btn-clear').click();
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);
   tapAt(6, 6, 41);
-  await waitFor(function () { return dbg.grid.get(6, 6) === true; }, 800);
   dropPointer(41);
+  await waitFor(function () { return dbg.grid.get(6, 6) === true; }, 800);
   var baseCount = dbg.grid.count();
   check('撤销测试的基准状态非空', baseCount === 1, 'count = ' + baseCount);
 
   doc.getElementById('btn-clear').click();
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);
   tapAt(2, 2, 42);
-  await waitFor(function () { return dbg.grid.get(2, 2) === true; }, 800);
   dropPointer(42);
+  await waitFor(function () { return dbg.grid.get(2, 2) === true; }, 800);
   tapAt(3, 3, 43);
-  await waitFor(function () { return dbg.grid.get(3, 3) === true; }, 800);
   dropPointer(43);
+  await waitFor(function () { return dbg.grid.get(3, 3) === true; }, 800);
   check('准备：两格点亮', dbg.grid.count() === 2, 'count = ' + dbg.grid.count());
 
   pressKey('z', { meta: true });
@@ -878,16 +904,19 @@ async function run(win, doc) {
   check('撤销也能还原「清空」', dbg.grid.count() === baseCount,
         dbg.grid.count() + ' vs 清空前 ' + baseCount);
 
-  // 拖动涂一整条 = **一步**撤销（不是每格一步）
+  // 拖动 = **框选**一条：画笔手势已经让位给选择，拖动不再落笔
   var beforeDrag = dbg.grid.count();
   tapAt(0, 9, 51);
   for (var dc = 1; dc <= 7; dc++) dragTo(dc, 9, 51);
   dropPointer(51);
-  check('一次拖动涂了 8 格', dbg.grid.count() - beforeDrag === 8,
-        '涂了 ' + (dbg.grid.count() - beforeDrag) + ' 格');
-  pressKey('z', { meta: true });
-  check('一次拖动只占一步撤销（整条一起退）', dbg.grid.count() === beforeDrag,
+  var dragSel = dbg.renderer.selection;
+  check('拖动拉出一条 8 格宽的选区',
+        !!dragSel && dragSel.col0 === 0 && dragSel.col1 === 7 &&
+        dragSel.row0 === 9 && dragSel.row1 === 9,
+        dragSel ? JSON.stringify(dragSel) : '无选区');
+  check('拖动框选不改动图案', dbg.grid.count() === beforeDrag,
         dbg.grid.count() + ' vs ' + beforeDrag);
+  pressKey('Escape');
 
   // 焦点在「谱子」输入框里时，⌘Z 要交给浏览器，别去撤销棋盘
   var keepCount = dbg.grid.count();
@@ -897,15 +926,16 @@ async function run(win, doc) {
   check('焦点在输入框里时 ⌘Z 不撤销棋盘',
         dbg.grid.count() === keepCount, 'count = ' + dbg.grid.count());
 
-  // ── 框选：Alt 拉框 / 整体搬动 / X 删除 / A 填充 ─────────
-  function altDrag(c0, r0, c1, r1, id) {
+  // ── 框选：拖动拉框 / 整体搬动 / X 删除 / A 填充 ─────────
+  /** 从一格拖到另一格拉出选区 —— 不需要修饰键，拖动本身就是框选 */
+  function boxDrag(c0, r0, c1, r1, id) {
     var a = ptAt(c0, r0), b = ptAt(c1, r1);
     mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
-      clientX: a.clientX, clientY: a.clientY, altKey: true,
+      clientX: a.clientX, clientY: a.clientY,
       bubbles: true, cancelable: true, pointerId: id, isPrimary: true
     }));
     mtx.dispatchEvent(new win.PointerEvent('pointermove', {
-      clientX: b.clientX, clientY: b.clientY, altKey: true,
+      clientX: b.clientX, clientY: b.clientY,
       bubbles: true, cancelable: true, pointerId: id, isPrimary: true
     }));
     dropPointer(id);
@@ -923,21 +953,21 @@ async function run(win, doc) {
   check('准备：一个 2×2 的块', dbg.grid.count() === 4, 'count = ' + dbg.grid.count());
   check('初始没有选区', dbg.renderer.selection === null);
 
-  altDrag(1, 1, 4, 4, 61);
+  boxDrag(1, 1, 4, 4, 61);
   var sel = dbg.renderer.selection;
-  check('Alt + 左键拖动拉出选区', !!sel, sel ? JSON.stringify(sel) : '无选区');
+  check('左键拖动拉出选区', !!sel, sel ? JSON.stringify(sel) : '无选区');
   check('选区矩形含起止两端',
         sel && sel.col0 === 1 && sel.row0 === 1 && sel.col1 === 4 && sel.row1 === 4,
         sel ? JSON.stringify(sel) : '');
 
-  altDrag(6, 6, 4, 4, 62);                 // 反向拖（右下 → 左上）
+  boxDrag(6, 6, 4, 4, 62);                 // 反向拖（右下 → 左上）
   sel = dbg.renderer.selection;
   check('反方向拖动会归一化',
         sel && sel.col0 === 4 && sel.row0 === 4 && sel.col1 === 6 && sel.row1 === 6,
         sel ? JSON.stringify(sel) : '');
 
   // 在选区内按住左键 → 整体搬走
-  altDrag(1, 1, 4, 4, 63);
+  boxDrag(1, 1, 4, 4, 63);
   var beforeMove = dbg.grid.count();
   var pd = ptAt(2, 2);                     // 按在选区内
   mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
@@ -972,7 +1002,7 @@ async function run(win, doc) {
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);
   dbg.grid.set(2, 2, true); dbg.grid.set(3, 2, true);
   dbg.grid.set(2, 3, true); dbg.grid.set(3, 3, true);
-  altDrag(1, 1, 4, 4, 65);
+  boxDrag(1, 1, 4, 4, 65);
   var beforeX = dbg.grid.count();
   check('准备：块确实落在选区内', beforeX === 4, 'count = ' + beforeX);
   key('x');
@@ -984,7 +1014,7 @@ async function run(win, doc) {
 
   // A 填满选区
   dbg.grid.clear();
-  altDrag(5, 5, 7, 7, 66);
+  boxDrag(5, 5, 7, 7, 66);
   key('a');
   check('A 填满选区（3×3 = 9 格）', dbg.grid.count() === 9, 'count = ' + dbg.grid.count());
   pressKey('z', { meta: true });
@@ -994,7 +1024,7 @@ async function run(win, doc) {
   dbg.grid.clear();
   dbg.grid.set(2, 2, true); dbg.grid.set(3, 2, true);
   dbg.grid.set(2, 3, true); dbg.grid.set(3, 3, true);
-  altDrag(1, 1, 4, 4, 70);
+  boxDrag(1, 1, 4, 4, 70);
   var countBeforeFar = dbg.grid.count();
   var pf0 = ptAt(2, 2);
   mtx.dispatchEvent(new win.PointerEvent('pointerdown', {
@@ -1019,7 +1049,7 @@ async function run(win, doc) {
   check('Esc 取消选区', dbg.renderer.selection === null);
 
   // 点画布**外面**的留白也要取消选择（那些区域到不了 canvas 的 pointerdown）
-  altDrag(2, 2, 4, 4, 72);
+  boxDrag(2, 2, 4, 4, 72);
   check('准备：有选区', !!dbg.renderer.selection);
   doc.body.dispatchEvent(new win.PointerEvent('pointerdown', {
     clientX: 5, clientY: 5, bubbles: true, cancelable: true,
@@ -1029,15 +1059,16 @@ async function run(win, doc) {
         JSON.stringify(dbg.renderer.selection));
 
   // 但点控件不该取消（正在调速度 / 音量 / 按播放时选区应该留着）
-  altDrag(2, 2, 4, 4, 74);
+  boxDrag(2, 2, 4, 4, 74);
   doc.getElementById('btn-glow').dispatchEvent(new win.PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, pointerId: 75, isPrimary: true
   }));
   check('点控件不会取消选择', !!dbg.renderer.selection,
         JSON.stringify(dbg.renderer.selection));
 
-  // 点在选区外 → 取消选择 + 正常涂抹
-  altDrag(2, 2, 4, 4, 67);
+  // 点在选区外 → 取消选择 + 正常落笔
+  key('Escape');
+  boxDrag(2, 2, 4, 4, 67);
   check('重新拉出选区', !!dbg.renderer.selection);
   tapAt(10, 10, 68);
   dropPointer(68);
@@ -1050,7 +1081,7 @@ async function run(win, doc) {
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);
   dbg.grid.set(1, 1, true);
   dbg.grid.set(2, 2, true);
-  altDrag(1, 1, 3, 3, 69);
+  boxDrag(1, 1, 3, 3, 69);
   var beforeKeys = dbg.grid.count();
   check('准备：选区内确实有音符', beforeKeys === 2 && !!dbg.renderer.selection,
         'count = ' + beforeKeys);
@@ -1061,6 +1092,39 @@ async function run(win, doc) {
         dbg.grid.count() === beforeKeys && !!dbg.renderer.selection,
         'count = ' + dbg.grid.count());
 
+  // ── 单击 / 拖动的边界分支 ───────────────────────────────
+  // 这两条盯的是判定逻辑里的岔路，不是主路径 —— 改坏了不会立刻显形。
+
+  // 拖出去又拖回起点格 = 什么也没框住 → 仍按单击处理，不能变成「点了没反应」
+  doc.getElementById('btn-clear').click();
+  await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  key('Escape');
+  var pOut = ptAt(5, 5), pAway = ptAt(7, 7);
+  function moveTo(p, id) {
+    mtx.dispatchEvent(new win.PointerEvent('pointermove', {
+      clientX: p.clientX, clientY: p.clientY,
+      bubbles: true, cancelable: true, pointerId: id, isPrimary: true
+    }));
+  }
+  tapAt(5, 5, 200);
+  moveTo(pAway, 200);
+  moveTo(pOut, 200);
+  dropPointer(200);
+  check('拖出去又拖回起点格 = 仍算单击（音落下来了）',
+        dbg.grid.get(5, 5) === true, 'cell(5,5) = ' + dbg.grid.get(5, 5));
+
+  // 在已有选区里单击：选区原样留着，不能缩成 1×1
+  // （点空格按的是「听一下这格」，不是「重新选一格」）
+  key('Escape');
+  dbg.grid.set(1, 1, true);
+  boxDrag(1, 1, 4, 4, 201);
+  var keepSel = JSON.stringify(dbg.renderer.selection);
+  tapAt(2, 2, 202);
+  dropPointer(202);
+  check('在选区里单击不会把选区缩成 1×1',
+        !!keepSel && JSON.stringify(dbg.renderer.selection) === keepSel,
+        keepSel + ' → ' + JSON.stringify(dbg.renderer.selection));
+
   // ── 复制 / 剪切 / 粘贴 ─────────────────────────────────
   // 剪贴板是**页面内存**里的一块（不走系统剪贴板 —— `file://` 下 readText 拿不到，
   // Chrome 还会弹权限），所以断言只能看行为：抄一份、贴到别处，图案该一模一样。
@@ -1068,6 +1132,7 @@ async function run(win, doc) {
 
   doc.getElementById('btn-clear').click();
   await waitFor(function () { return dbg.grid.count() === 0; }, 800);
+  key('Escape');          // 清掉上一段留下的选区，免得下面从选区里起手被当成搬动
   cmd('v');
   check('剪贴板空着时 ⌘V 什么都不做', dbg.grid.count() === 0,
         'count = ' + dbg.grid.count());
@@ -1075,7 +1140,7 @@ async function run(win, doc) {
   // 一个「只有四角」的 3×3 块 —— 中空是为了验证粘贴是**覆盖**而不是合并
   dbg.grid.set(2, 2, true); dbg.grid.set(4, 2, true);
   dbg.grid.set(2, 4, true); dbg.grid.set(4, 4, true);
-  altDrag(2, 2, 4, 4, 101);
+  boxDrag(2, 2, 4, 4, 101);
   cmd('c');
   check('⌘C 复制不改动图案', dbg.grid.count() === 4, 'count = ' + dbg.grid.count());
 
@@ -1089,7 +1154,7 @@ async function run(win, doc) {
   for (var pc = 8; pc <= 10; pc++) {
     for (var pr = 8; pr <= 10; pr++) dbg.grid.set(pc, pr, true);
   }
-  altDrag(8, 8, 10, 10, 102);
+  boxDrag(8, 8, 10, 10, 102);
   cmd('v');
   check('⌘V 把块贴到选区左上角',
         dbg.grid.get(8, 8) && dbg.grid.get(10, 8) &&
@@ -1123,7 +1188,7 @@ async function run(win, doc) {
   pressKey('z', { meta: true, shift: true });
 
   // ⌘X = 复制 + 清空选区
-  altDrag(2, 2, 4, 4, 103);
+  boxDrag(2, 2, 4, 4, 103);
   cmd('x');
   check('⌘X 剪切会清空选区', dbg.grid.count() === 4 && !dbg.grid.get(2, 2),
         'count = ' + dbg.grid.count());
@@ -1146,7 +1211,9 @@ async function run(win, doc) {
         'count = ' + dbg.grid.count());
 
   // 贴到右下角：整块夹进棋盘，而不是裁掉溢出的两行两列
-  altDrag(15, 15, 15, 15, 104);
+  // 先把选区落到 (15,15)：单击空格落笔，再单击它 = 单独选中这一格
+  tapAt(15, 15, 104); dropPointer(104);
+  tapAt(15, 15, 105); dropPointer(105);
   cmd('v');
   check('贴到边缘时整块夹进棋盘（不丢音）',
         dbg.grid.get(13, 13) && dbg.grid.get(15, 13) &&

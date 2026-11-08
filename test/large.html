@@ -683,11 +683,14 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
           '（视口 ' + R3.viewCol0 + '..' + (R3.viewCol0 + R3.viewCols - 1) + '）');
 
     // ── 命中测试：坐标要跟着视口走 ─────────────────────────
+    /** 在某一格完整点一下（按下 + 抬起）—— 落笔发生在抬起 */
     function tapCell(col, row, pointerId) {
-      canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
+      var ev = {
         clientX: xOf(col), clientY: yOf(row),
         bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
-      }));
+      };
+      canvas.dispatchEvent(new win.PointerEvent('pointerdown', ev));
+      canvas.dispatchEvent(new win.PointerEvent('pointerup', ev));
     }
 
     check('初始网格为空', dbg.grid.count() === 0, 'count = ' + dbg.grid.count());
@@ -752,15 +755,17 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     var shareCodeEl = doc.getElementById('share-code');
     var codeBefore = shareCodeEl.value;
 
-    tapCell(20, 20, 61);
-    var lit20 = await waitFor(function () { return dbg.grid.get(20, 20) === true; }, 1500);
+    // 直接改模型，而不是点棋盘：**点画布会先把浮层收起来**（点外面收起，
+    // 见 bindPopovers），那样测到的是浮层行为，测不到「面板开着时代码跟着走」。
+    dbg.grid.set(20, 20, true);
+    var codeNow = win.TM.Store.encode(
+      dbg.grid, win.TM.RUNTIME.notes,
+      { bpm: dbg.sequencer.tempo, vol: parseInt(doc.getElementById('volume').value, 10),
+        loopIn: dbg.sequencer.loopIn, loopOut: dbg.sequencer.loopOut });
     check('大面板：面板展开时，代码跟着格子实时更新',
-          lit20 && shareCodeEl.value !== codeBefore &&
-          shareCodeEl.value === win.TM.Store.encode(
-            dbg.grid, win.TM.RUNTIME.notes,
-            { bpm: dbg.sequencer.tempo, vol: parseInt(doc.getElementById('volume').value, 10),
-              loopIn: dbg.sequencer.loopIn, loopOut: dbg.sequencer.loopOut }),
-          shareCodeEl.value.slice(0, 16) + '…');
+          shareCodeEl.value !== codeBefore && shareCodeEl.value === codeNow,
+          'changed=' + (shareCodeEl.value !== codeBefore) +
+          ' eq=' + (shareCodeEl.value === codeNow));
 
     win.dispatchEvent(new win.KeyboardEvent('keydown', {
       key: 'z', metaKey: true, bubbles: true, cancelable: true
@@ -774,13 +779,13 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     }));
     await wait(80);
 
-    function altDragCell(c0, r0, c1, r1, pointerId) {
+    function boxDragCell(c0, r0, c1, r1, pointerId) {
       canvas.dispatchEvent(new win.PointerEvent('pointerdown', {
-        clientX: xOf(c0), clientY: yOf(r0), altKey: true,
+        clientX: xOf(c0), clientY: yOf(r0),
         bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
       }));
       canvas.dispatchEvent(new win.PointerEvent('pointermove', {
-        clientX: xOf(c1), clientY: yOf(r1), altKey: true,
+        clientX: xOf(c1), clientY: yOf(r1),
         bubbles: true, cancelable: true, pointerId: pointerId, isPrimary: true
       }));
       canvas.dispatchEvent(new win.PointerEvent('pointerup', {
@@ -790,9 +795,9 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     }
 
     var selBase = R3.viewCol0;
-    altDragCell(selBase + 2, 40, selBase + 7, 45, 71);
+    boxDragCell(selBase + 2, 40, selBase + 7, 45, 71);
     var bigSel = R3.selection;
-    check('平移后 Alt 拖动拉出选区（命中按视口算）',
+    check('平移后拖动拉出选区（命中按视口算）',
           !!bigSel && bigSel.col0 === selBase + 2 && bigSel.row0 === 40 &&
           bigSel.col1 === selBase + 7 && bigSel.row1 === 45,
           bigSel ? JSON.stringify(bigSel) : '无选区');
@@ -811,7 +816,7 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     dbg.grid.set(selBase + 2, 40, true);
     dbg.grid.set(selBase + 4, 42, true);
     dbg.grid.set(selBase + 3, 44, true);
-    altDragCell(selBase + 2, 40, selBase + 4, 44, 91);
+    boxDragCell(selBase + 2, 40, selBase + 4, 44, 91);
 
     function cmdKey(k) {
       win.dispatchEvent(new win.KeyboardEvent('keydown',
@@ -822,7 +827,9 @@ try { localStorage.removeItem('matrixmusic.score.large'); } catch (e) { /* 存�
     check('大面板：⌘C 只抄不改（图案原样）', dbg.grid.count() === beforeCopy,
           'count = ' + dbg.grid.count());
 
-    altDragCell(selBase + 10, 10, selBase + 10, 10, 92);   // 1×1 目标，粘贴锚点
+    // 目标位置：单击落笔，再单击它 = 单独选中这一格（1×1 粘贴锚点）
+    tapCell(selBase + 10, 10, 92);
+    tapCell(selBase + 10, 10, 93);
     cmdKey('v');
     check('大面板：粘贴按行列各归各位（行不串位）',
           dbg.grid.get(selBase + 10, 10) && dbg.grid.get(selBase + 12, 12) &&
