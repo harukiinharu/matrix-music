@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一个音是怎么来的 · Matrix Music</title>
+<style>
+  :root { --bg:#07090C; --fg:#E8EDF4; --dim:#7C8798; --line:#1B2028; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 44px 28px 72px; max-width: 760px;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { font-size: 19px; font-weight: 500; margin: 0 0 6px; letter-spacing: .01em; }
+  .sub { color: var(--dim); font-size: 13px; margin: 0 0 34px; }
+  .pad { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 34px; }
+  .slot { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .slot span { font-size: 10px; color: #5A6474; font-variant-numeric: tabular-nums; }
+  .cell {
+    width: 62px; height: 62px; border-radius: 8px; border: 0; padding: 0;
+    cursor: pointer; background: #14171D;
+    transition: background .14s ease, box-shadow .28s ease, transform .06s ease;
+  }
+  .cell:active { transform: scale(.93); }
+  .timbres { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+  .timbres button {
+    background: transparent; color: var(--dim); border: 1px solid var(--line);
+    border-radius: 999px; padding: 6px 14px; font: inherit; font-size: 12px;
+    cursor: pointer; transition: .15s;
+  }
+  .timbres button.on { color: var(--fg); border-color: #4A5464; background: #14171D; }
+  .envwrap {
+    border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px 10px; margin-bottom: 14px;
+  }
+  .envwrap .cap { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+  canvas#env { width: 100%; display: block; }
+  .log { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; min-height: 20px; margin: 0 0 34px; }
+  .mini { font-size: 11px; color: var(--dim); margin: 0; line-height: 1.7; }
+  pre {
+    background: #0C1015; border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; margin: 8px 0 0;
+    font: 11px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace; color: #A9B4C4;
+  }
+  pre b { color: #5DCAA5; font-weight: 400; }
+</style>
+</head>
+<body>
+
+<h1>一个音是怎么来的</h1>
+<p class="sub">点格子。下面这段代码就是它发声的全部，没有采样、没有乐器、没有音色库。</p>
+
+<div class="pad" id="pad"></div>
+
+<div class="timbres" id="timbres"></div>
+
+<div class="envwrap">
+  <div class="cap">当前音色的振幅包络（纵轴 = 音量，横轴 = 0.5 秒）</div>
+  <canvas id="env"></canvas>
+</div>
+
+<p class="log" id="log">点任意一个格子开始</p>
+
+<p class="mini">最裸的版本，只要这三行就能响（长音、很响、停不下来）：</p>
+<pre>var ctx = new AudioContext();
+var osc = ctx.createOscillator();
+osc.frequency.value = 440;   <b>// 音高只由这一个数决定</b>
+osc.connect(ctx.destination);
+osc.start();</pre>
+
+<script>
+(function () {
+  'use strict';
+
+  var NOTES = [96, 93, 91, 89, 86, 84, 81, 79];
+  var DURATION = 0.5;
+
+  // 四种音色 = 四种「频谱 + 包络」的组合。partials 是频率倍数，
+  // 强度按 1/n 递减 —— 这就是自然界里几乎一切物体振动的样子。
+  var TIMBRES = {
+    pure:  { name: '纯正弦 · 平方衰减', partials: [1], wave: 'sine', env: 'square' },
+    bell:  { name: '纯正弦 · 指数衰减', partials: [1], wave: 'sine', env: 'exp' },
+    pluck: { name: '加泛音 · 指数衰减', partials: [1, 2, 3, 4], wave: 'sine', env: 'exp' },
+    tri:   { name: '三角波 · 指数衰减', partials: [1], wave: 'triangle', env: 'exp' }
+  };
+  var current = 'pure';
+
+  var ctx = null;
+
+  function audio() {
+    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+
+  function freqOf(note) {
+    return 440 * Math.pow(2, (note - 72) / 12);
+  }
+
+  function partialGain(partials) {
+    var sum = 0, i;
+    for (i = 0; i < partials.length; i++) sum += 1 / (i + 1);
+    return 1 / sum;
+  }
+
+  // 包络：一条从峰值 0.5 降到 0 的曲线。乘法因子 norm 保证泛音叠加后不爆音。
+  // square 分支的形状就是 Matrix Music 里那条 (0.4·(1−t/T))²，只是峰值统一到 0.5
+  // 以便和指数曲线比较响度。
+  function envCurve(kind, norm) {
+    var n = 128, curve = new Float32Array(n), i, u;
+    for (i = 0; i < n; i++) {
+      u = i / (n - 1);
+      curve[i] = kind === 'square'
+        ? 0.5 * (1 - u) * (1 - u) * norm
+        : 0.5 * Math.exp(-7 * u) * norm;
+    }
+    curve[n - 1] = 0;
+    return curve;
+  }
+
+  function play(note) {
+    var c = audio();
+    var t0 = c.currentTime + 0.01;
+    var timbre = TIMBRES[current];
+    var partials = timbre.partials;
+    var norm = partialGain(partials);
+    var base = freqOf(note);
+
+    var env = c.createGain();
+    env.gain.setValueAtTime(0, t0);
+    env.gain.setValueCurveAtTime(envCurve(timbre.env, norm), t0, DURATION);
+
+    var pan = c.createStereoPanner();
+    pan.pan.value = (Math.random() - Math.random()) * 0.5;
+    env.connect(pan);
+    pan.connect(c.destination);
+
+    var osc, gain, first = null;
+    for (var i = 0; i < partials.length; i++) {
+      osc = c.createOscillator();
+      osc.type = timbre.wave;
+      osc.frequency.value = base * partials[i];
+      gain = c.createGain();
+      gain.gain.value = 1 / (i + 1);
+      osc.connect(gain);
+      gain.connect(env);
+      osc.start(t0);
+      osc.stop(t0 + DURATION + 0.02);
+      if (!first) first = osc;
+    }
+
+    first.onended = function () {
+      env.disconnect();
+      pan.disconnect();
+    };
+
+    return base;
+  }
+
+  function hueOf(note) {
+    return 202 + (Math.floor(note / 12) - 5) * 24;
+  }
+
+  var pad = document.getElementById('pad');
+  var timers = [];
+
+  NOTES.forEach(function (note, row) {
+    var slot = document.createElement('div');
+    slot.className = 'slot';
+
+    var btn = document.createElement('button');
+    btn.className = 'cell';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', '第 ' + row + ' 行，' + Math.round(freqOf(note)) + ' 赫兹');
+    btn.style.background = 'hsl(' + hueOf(note) + ', 26%, 11%)';
+
+    btn.addEventListener('click', function () {
+      var c = audio();
+      var base = play(note);
+
+      btn.style.background = 'hsl(' + hueOf(note) + ', 62%, 60%)';
+      btn.style.boxShadow = '0 0 26px hsla(' + hueOf(note) + ', 70%, 60%, .45)';
+
+      clearTimeout(timers[row]);
+      timers[row] = setTimeout(function () {
+        btn.style.background = 'hsl(' + hueOf(note) + ', 26%, 11%)';
+        btn.style.boxShadow = 'none';
+      }, DURATION * 1000);
+
+      var t = TIMBRES[current];
+      document.getElementById('log').textContent =
+        '行 ' + row + ' · MIDI ' + note + ' · ' + base.toFixed(1) + ' Hz · ' +
+        t.partials.length + ' 个振荡器叠加 · ' +
+        (t.env === 'square' ? '平方衰减' : '指数衰减') + ' · ' +
+        DURATION + ' s 归零 · 音频时钟 ' + c.currentTime.toFixed(2) + ' s';
+    });
+
+    var label = document.createElement('span');
+    label.textContent = Math.round(freqOf(note));
+
+    slot.appendChild(btn);
+    slot.appendChild(label);
+    pad.appendChild(slot);
+  });
+
+  var box = document.getElementById('timbres');
+  Object.keys(TIMBRES).forEach(function (key) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = TIMBRES[key].name;
+    if (key === current) b.className = 'on';
+    b.addEventListener('click', function () {
+      current = key;
+      Array.prototype.forEach.call(box.children, function (el) {
+        el.className = '';
+      });
+      b.className = 'on';
+      drawEnv();
+    });
+    box.appendChild(b);
+  });
+
+  function drawEnv() {
+    var cv = document.getElementById('env');
+    var g = cv.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var W = 520, H = 104;
+
+    if (cv.width !== Math.round(W * dpr)) {
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+    }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+
+    var t = TIMBRES[current];
+    var curve = envCurve(t.env, partialGain(t.partials));
+    var peak = 0.5;
+    var x0 = 2, x1 = W - 2, base = H - 8, hgt = H - 22;
+
+    g.strokeStyle = '#1B2028';
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(x0, base);
+    g.lineTo(x1, base);
+    g.stroke();
+
+    g.strokeStyle = '#5DCAA5';
+    g.lineWidth = 1.5;
+    g.beginPath();
+    for (var i = 0; i < curve.length; i++) {
+      var x = x0 + (x1 - x0) * i / (curve.length - 1);
+      var y = base - (curve[i] / peak) * hgt;
+      if (i === 0) g.moveTo(x, y);
+      else g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+
+  drawEnv();
+  window.addEventListener('resize', drawEnv);
+})();
+</script>
+</body>
+</html>
